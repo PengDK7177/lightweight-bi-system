@@ -1,0 +1,9 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "password_hash": "31c44fec89506b68aba67a7150950406$b07c3ed194e59a5650c1740945d77df7b721f5683171235a9817d4b9def52928",
+      "role": "admin"
+    }
+  ]
+}
