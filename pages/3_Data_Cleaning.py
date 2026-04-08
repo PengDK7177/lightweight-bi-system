@@ -1,16 +1,8 @@
-# 引入 Streamlit 用于构建页面 UI
-# Import Streamlit for building the page UI
 import streamlit as st
-
-# 从清洗模块引入三个核心清洗函数
-# Import the three core cleaning functions from the cleaning module
-from modules.cleaning import remove_duplicates, fill_missing, standardize_columns
-
-# 引入登录守卫，确保只有已登录用户才能访问此页面
-# Import the login guard to ensure only authenticated users can access this page
+from modules.cleaning import remove_duplicates, fill_missing, standardize_columns, standardize_dates
 from modules.auth import require_login
 
-# 若用户未登录则阻止页面继续渲染
+
 # Halt page rendering for unauthenticated users
 require_login(logout_key="logout_data_cleaning")
 
@@ -56,6 +48,20 @@ if st.button("Apply Missing Value Strategy"):
     df = fill_missing(df, strategy=strategy)
     st.session_state["df"] = df
     st.success(f"Applied strategy: {strategy}")
+
+# 按钮：自动检测日期列并将其格式统一为英国标准格式 DD/MM/YYYY
+# Button: auto-detect date columns and reformat them to UK standard DD/MM/YYYY
+if st.button("Standardize Dates to UK Format (DD/MM/YYYY)"):
+    df, converted_cols = standardize_dates(df)
+    st.session_state["df"] = df
+    if converted_cols:
+        # 列出所有已转换的列名，方便用户确认哪些列受到影响
+        # List every converted column so the user can confirm which columns were affected
+        st.success(f"Date columns reformatted to DD/MM/YYYY: {', '.join(converted_cols)}")
+    else:
+        # 未发现可识别的日期列时给予提示
+        # Inform the user when no recognisable date columns were found
+        st.info("No date columns detected.")
 
 # 预览清洗后数据集的前 30 行，让用户即时确认效果
 # Preview the first 30 rows of the cleaned dataset so the user can verify the result immediately
