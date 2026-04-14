@@ -1,13 +1,5 @@
-# 引入 Streamlit 用于构建页面 UI
-# Import Streamlit for building the page UI
 import streamlit as st
-
-# 引入 pandas 用于数值转换，确保图表和 KPI 不因脏数据崩溃
-# Import pandas for numeric coercion to prevent chart/KPI crashes on dirty values
 import pandas as pd
-
-# 引入登录守卫，确保只有已登录用户才能访问此页面
-# Import the login guard to ensure only authenticated users can access this page
 from modules.auth import require_login
 
 # 若用户未登录则阻止页面继续渲染
@@ -24,6 +16,13 @@ df = st.session_state.get("df")
 if df is None:
     st.warning("No dataset in session. Go to Data Import first.")
     st.stop()
+
+# NFR4 隐私验证：若用户已在清洗页对 PII 执行脱敏，则展示提醒，确认敏感字段不会在此处暴露原始值
+# NFR4 privacy verification: if PII masking was applied in the Cleaning page, show a notice
+# confirming that sensitive fields are not exposed in their original form here
+if st.session_state.get("pii_masked"):
+    st.info("PII notice: email and phone fields in this dataset have been masked. "
+            "Raw sensitive values are not displayed here.")
 
 # 筛选出所有整数或浮点数类型的列，用于图表绘制和 KPI 计算
 # Filter integer and float columns to use for charts and KPI calculations

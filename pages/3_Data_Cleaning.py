@@ -1,5 +1,12 @@
 import streamlit as st
-from modules.cleaning import remove_duplicates, fill_missing, standardize_columns, standardize_dates
+from modules.cleaning import (
+    remove_duplicates,
+    fill_missing,
+    standardize_columns,
+    standardize_dates,
+    standardize_currency,
+    mask_pii,
+)
 from modules.auth import require_login
 
 
@@ -62,6 +69,37 @@ if st.button("Standardize Dates to UK Format (DD/MM/YYYY)"):
         # 未发现可识别的日期列时给予提示
         # Inform the user when no recognisable date columns were found
         st.info("No date columns detected.")
+
+# 按钮：自动检测 GBP 货币列并将其标准化为数值类型（去除 £ 符号及逗号）
+# Button: auto-detect GBP currency columns and normalise them to float (strip £ and commas)
+if st.button("Standardize GBP Currency Fields"):
+    df, converted_cols = standardize_currency(df)
+    st.session_state["df"] = df
+    if converted_cols:
+        # 告知用户哪些列被识别为货币列并完成标准化
+        # Inform the user which columns were identified as currency and normalised
+        st.success(f"Currency columns normalised to float: {', '.join(converted_cols)}")
+    else:
+        # 未发现货币列时给予提示
+        # Inform the user when no currency columns were detected
+        st.info("No GBP currency columns detected.")
+
+# 按钮：自动检测邮箱和手机号列并进行脱敏（NFR4 隐私保护）
+# Button: auto-detect and mask email / phone columns to protect PII (NFR4 privacy requirement)
+if st.button("Mask PII (Email & Phone)"):
+    df, masked_cols = mask_pii(df)
+    st.session_state["df"] = df
+    if masked_cols:
+        # 列出已脱敏的列，让用户确认敏感数据已被处理
+        # List the masked columns so the user can confirm sensitive data has been handled
+        st.success(f"PII masked — affected columns: {', '.join(masked_cols)}")
+        # 标记会话状态，供 Dashboard 等页面展示脱敏提醒（NFR4 验证）
+        # Set a session flag so Dashboard and export pages can display a masking notice (NFR4 verification)
+        st.session_state["pii_masked"] = True
+    else:
+        # 未发现 PII 列时给予提示
+        # Inform the user when no PII columns were found
+        st.info("No email or phone columns detected.")
 
 # 预览清洗后数据集的前 30 行，让用户即时确认效果
 # Preview the first 30 rows of the cleaned dataset so the user can verify the result immediately
