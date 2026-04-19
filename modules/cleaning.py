@@ -96,6 +96,30 @@ def standardize_dates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     # Track converted column names so the caller can display feedback in the UI
     converted: list[str] = []
 
+    def _best_date_parse(series: pd.Series) -> tuple[pd.Series, float]:
+        """
+        尝试多种日期解析策略，返回成功率最高的解析结果。
+        Try multiple date parsing strategies and return the parsed series with the highest success ratio.
+        """
+        # 候选解析策略：优先显式格式，最后兜底自动推断
+        # Candidate parsing strategies: explicit formats first, then generic inference
+        candidates = [
+            pd.to_datetime(series, errors="coerce", format="%Y-%m-%d"),
+            pd.to_datetime(series, errors="coerce", format="%d/%m/%Y"),
+            pd.to_datetime(series, errors="coerce", format="%d-%m-%Y"),
+            pd.to_datetime(series, errors="coerce", dayfirst=True),
+            pd.to_datetime(series, errors="coerce", dayfirst=False),
+        ]
+
+        best = candidates[0]
+        best_ratio = (best.notna().sum() / len(series)) if len(series) > 0 else 0.0
+        for parsed in candidates[1:]:
+            ratio = (parsed.notna().sum() / len(series)) if len(series) > 0 else 0.0
+            if ratio > best_ratio:
+                best = parsed
+                best_ratio = ratio
+        return best, best_ratio
+
     for col in out.columns:
         # 情况 1：列已是 datetime 类型，直接格式化为 DD/MM/YYYY 字符串
         # Case 1: column is already a datetime dtype — format directly to DD/MM/YYYY string
@@ -104,29 +128,37 @@ def standardize_dates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             converted.append(col)
             continue
 
-        # 情况 2：object 或 string 类型列，尝试解析为 datetime，成功则格式化
-        # Case 2: object/string column — attempt to parse as datetime; format if successful
-        if out[col].dtype == object:
-            # 取前 50 个非空样本进行快速嗅探，避免对大列做全量解析尝试
-            # Sample up to 50 non-null values for a quick sniff to avoid full-column parse attempts
-            sample = out[col].dropna().head(50)
-            try:
-                # infer_datetime_format 加速解析；errors='raise' 确保解析失败时跳过该列
-                # infer_datetime_format speeds up parsing; errors='raise' ensures we skip on failure
-                parsed_sample = pd.to_datetime(sample, infer_datetime_format=True, errors="raise")
-                # 样本全部解析成功后，对整列进行转换（失败值变为 NaT，再还原为空字符串）
-                # If the full sample parses successfully, convert the entire column (NaT becomes empty string)
-                parsed = pd.to_datetime(out[col], infer_datetime_format=True, errors="coerce")
-                # 仅当至少一半的非空值被成功解析时才视为日期列，防止误判普通文本列
-                # Only treat the column as a date column if at least half of non-null values parsed successfully
-                non_null = out[col].notna().sum()
-                if non_null > 0 and (parsed.notna().sum() / non_null) >= 0.5:
-                    out[col] = parsed.dt.strftime("%d/%m/%Y").fillna("")
-                    converted.append(col)
-            except (ValueError, TypeError):
-                # 解析失败，跳过该列，保持原始内容不变
-                # Parsing failed — skip this column and leave its content unchanged
-                pass
+        # 情况 2：文本列（object 或 pandas string）尝试识别日期
+        # Case 2: textual column (object or pandas string) — attempt date detection
+        if not (pd.api.types.is_object_dtype(out[col]) or pd.api.types.is_string_dtype(out[col])):
+            continue
+
+        # 取前 50 个非空样本做快速识别，按可解析比例判断是否为日期列
+        # Use up to 50 non-null samples and decide by parse ratio instead of requiring 100% success
+        sample = out[col].dropna().head(50)
+        if len(sample) == 0:
+            continue
+
+        # 通过多策略尝试提高识别准确率（兼容 YYYY-MM-DD 与 UK 格式）
+        # Use multi-strategy parsing for robust detection across ISO and UK date formats
+        parsed_sample, sample_ratio = _best_date_parse(sample)
+
+        # 样本解析率过低则跳过，防止误判普通文本列
+        # Skip if sample parse ratio is too low to avoid false positives on text columns
+        if sample_ratio < 0.6:
+            continue
+
+        # 对全列使用同样的多策略解析并再次校验成功率
+        # Parse the full column with the same multi-strategy approach and validate again
+        parsed, _ = _best_date_parse(out[col])
+        non_null = out[col].notna().sum()
+        full_ratio = (parsed.notna().sum() / non_null) if non_null > 0 else 0.0
+
+        # 满足阈值才执行标准化输出
+        # Standardize output only when the full-column parse ratio passes the threshold
+        if full_ratio >= 0.5:
+            out[col] = parsed.dt.strftime("%d/%m/%Y").fillna("")
+            converted.append(col)
 
     return out, converted
 
@@ -234,8 +266,25 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # 匹配英国及常见国际手机号的正则表达式（允许空格、连字符、括号、+44 前缀等）
 # Regex for UK and common international phone numbers (spaces, hyphens, brackets, +44 prefix allowed)
 _PHONE_RE = re.compile(
-    r"^(\+?\d[\d\s\-().]{6,}\d)$"
+    r"^(\+?\d[\d\s\-().]{6,}\d)(?:\s*(?:x|ext\.?)\s*\d+)?$",
+    re.IGNORECASE,
 )
+
+
+def _is_likely_date_series(sample: pd.Series, threshold: float = 0.8) -> bool:
+    """
+    判断一列样本是否更像日期而非手机号。
+    Decide whether a sample series looks more like dates than phone numbers.
+
+    规则 / Rule:
+    - 使用 dayfirst=True 解析样本；若可解析比例 >= threshold，视为日期列。
+      Parse with dayfirst=True; treat as date-like when parse ratio >= threshold.
+    """
+    if sample is None or len(sample) == 0:
+        return False
+
+    parsed = pd.to_datetime(sample.astype(str).str.strip(), errors="coerce", dayfirst=True)
+    return (parsed.notna().sum() / len(sample)) >= threshold
 
 
 def _mask_email(value: str) -> str:
@@ -312,9 +361,9 @@ def mask_pii(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     masked_cols: list[str] = []
 
     for col in out.columns:
-        # 仅处理 object 类型列，数值列不含 PII
-        # Only process object columns; numeric columns cannot contain PII
-        if out[col].dtype != object:
+        # 处理文本列（object 或 pandas string）；其他类型通常不含 PII
+        # Process textual columns (object or pandas string); other dtypes typically do not contain PII
+        if not (pd.api.types.is_object_dtype(out[col]) or pd.api.types.is_string_dtype(out[col])):
             continue
 
         # 取前 100 个非空样本进行检测
@@ -323,13 +372,25 @@ def mask_pii(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         if len(sample) == 0:
             continue
 
+        # 若该列高度疑似日期列，则跳过手机号检测，避免把 invoice_date 误判成 phone
+        # If this column is highly date-like, skip phone detection to avoid misclassifying invoice_date
+        is_date_like = _is_likely_date_series(sample, threshold=0.8)
+
         # 统计样本中匹配邮箱 / 手机号正则的比例
         # Count how many sample values match the email / phone regex
         email_hits = sample.apply(lambda v: bool(_EMAIL_RE.match(v.strip()))).sum()
         phone_hits = sample.apply(lambda v: bool(_PHONE_RE.match(v.strip()))).sum()
         ratio = len(sample)
+        email_ratio = email_hits / ratio
 
-        if email_hits / ratio >= 0.5:
+        # 手机号命中率外，再附加数字位数约束：至少 10 位数字，减少日期字符串误判
+        # In addition to regex hit rate, require at least 10 digits to reduce date-string false positives
+        phone_like_hits = sample.apply(
+            lambda v: bool(_PHONE_RE.match(v.strip())) and len(re.findall(r"\d", v)) >= 10
+        ).sum()
+        phone_ratio = phone_like_hits / ratio
+
+        if email_ratio >= 0.5:
             # 识别为邮箱列：对每个非空值应用邮箱脱敏函数
             # Identified as an email column — apply the email masking function to each non-null value
             out[col] = out[col].apply(
@@ -337,11 +398,13 @@ def mask_pii(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             )
             masked_cols.append(f"{col} (email)")
 
-        elif phone_hits / ratio >= 0.5:
+        elif (not is_date_like) and phone_ratio >= 0.5:
             # 识别为手机号列：对每个非空值应用手机号脱敏函数
             # Identified as a phone column — apply the phone masking function to each non-null value
             out[col] = out[col].apply(
-                lambda v: _mask_phone(str(v).strip()) if pd.notna(v) and _PHONE_RE.match(str(v).strip()) else v
+                lambda v: _mask_phone(str(v).strip())
+                if pd.notna(v) and _PHONE_RE.match(str(v).strip()) and len(re.findall(r"\d", str(v))) >= 10
+                else v
             )
             masked_cols.append(f"{col} (phone)")
 

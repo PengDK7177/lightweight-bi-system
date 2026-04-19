@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 from modules.cleaning import (
     remove_duplicates,
     fill_missing,
@@ -16,6 +17,10 @@ require_login(logout_key="logout_data_cleaning")
 # 显示页面标题
 # Display the page title
 st.title("Data Cleaning")
+
+# 读取已识别的货币列（用于预览时显示 £ 格式，不影响底层数值）
+# Read recognised currency columns (used to show £ in preview only, without changing raw numeric values)
+currency_cols = st.session_state.get("currency_cols", [])
 
 # 从会话状态读取数据集；若不存在则提示用户先前往数据导入页
 # Read the dataset from session state; prompt the user to import data first if absent
@@ -76,6 +81,10 @@ if st.button("Standardize GBP Currency Fields"):
     df, converted_cols = standardize_currency(df)
     st.session_state["df"] = df
     if converted_cols:
+        # 记录货币列供表格预览使用，显示为 £x,xxx.xx
+        # Store currency columns for preview formatting as £x,xxx.xx
+        st.session_state["currency_cols"] = converted_cols
+        currency_cols = converted_cols
         # 告知用户哪些列被识别为货币列并完成标准化
         # Inform the user which columns were identified as currency and normalised
         st.success(f"Currency columns normalised to float: {', '.join(converted_cols)}")
@@ -101,6 +110,20 @@ if st.button("Mask PII (Email & Phone)"):
         # Inform the user when no PII columns were found
         st.info("No email or phone columns detected.")
 
-# 预览清洗后数据集的前 30 行，让用户即时确认效果
-# Preview the first 30 rows of the cleaned dataset so the user can verify the result immediately
-st.dataframe(st.session_state["df"].head(30), use_container_width=True)
+# 预览清洗后数据：若识别到货币列，则仅在显示层添加 £ 格式（不修改底层 DataFrame）
+# Preview cleaned data: if currency columns exist, apply £ formatting at display layer only
+preview_df = st.session_state["df"].head(30)
+if currency_cols:
+    # 仅对当前仍存在且为数值类型的列应用 GBP 样式
+    # Apply GBP style only to existing columns that are numeric
+    fmt = {
+        c: (lambda v: f"£{v:,.2f}" if pd.notna(v) else "")
+        for c in currency_cols
+        if c in preview_df.columns and pd.api.types.is_numeric_dtype(preview_df[c])
+    }
+    if fmt:
+        st.dataframe(preview_df.style.format(fmt), use_container_width=True)
+    else:
+        st.dataframe(preview_df, use_container_width=True)
+else:
+    st.dataframe(preview_df, use_container_width=True)
