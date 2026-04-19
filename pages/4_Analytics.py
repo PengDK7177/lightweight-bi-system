@@ -1,13 +1,12 @@
-# 引入 Streamlit 用于构建页面 UI
-# Import Streamlit for building the page UI
 import streamlit as st
-
-# 从分析模块引入增值税计算和 KPI 统计函数
-# Import VAT calculation and KPI aggregation functions from the analytics module
-from modules.analytics import calculate_vat, basic_kpis
-
-# 引入登录守卫，确保只有已登录用户才能访问此页面
-# Import the login guard to ensure only authenticated users can access this page
+import pandas as pd
+from modules.analytics import (
+    calculate_vat,
+    basic_kpis,
+    cash_flow_analysis,
+    rfm_analysis,
+    rfm_segment_summary,
+)
 from modules.auth import require_login
 
 # 若用户未登录则阻止页面继续渲染
@@ -31,6 +30,31 @@ num_cols = [c for c in df.columns if df[c].dtype.kind in "if"]
 if not num_cols:
     st.error("No numeric column available for analysis.")
     st.stop()
+
+# 候选日期列：名称命中常见日期关键词，或列值能够解析为日期
+# Candidate date columns: name contains date-related keywords, or values can be parsed as dates
+date_hint_cols = [c for c in df.columns if any(k in c.lower() for k in ["date", "time", "day"])]
+date_like_cols = []
+for c in df.columns:
+    if df[c].dtype.kind in "if":
+        continue
+    sample = df[c].dropna().head(50)
+    if len(sample) == 0:
+        continue
+    parsed = pd.to_datetime(sample.astype(str), errors="coerce")
+    if parsed.notna().mean() >= 0.6:
+        date_like_cols.append(c)
+date_cols = list(dict.fromkeys(date_hint_cols + date_like_cols))
+
+# 候选客户列：优先 customer_id / customer / client 等关键词
+# Candidate customer columns: prefer names like customer_id / customer / client
+customer_cols = [c for c in df.columns if any(k in c.lower() for k in ["customer", "client", "account"]) ]
+
+# 候选状态列：用于现金流里的已支付/未支付区分
+# Candidate status columns: used to distinguish paid vs unpaid cash flow
+status_cols = [c for c in df.columns if any(k in c.lower() for k in ["status", "payment", "state"])]
+
+st.subheader("VAT Analysis")
 
 # 让用户从数值列中选择用于 VAT 计算的金额列
 # Let the user select the amount column to use for VAT calculation
@@ -62,3 +86,47 @@ c2.metric("Sum", f"{k['sum']:.2f}")       # 总和 / Sum
 c3.metric("Avg", f"{k['avg']:.2f}")       # 平均值 / Mean
 c4.metric("Min", f"{k['min']:.2f}")       # 最小值 / Minimum
 c5.metric("Max", f"{k['max']:.2f}")       # 最大值 / Maximum
+
+
+st.subheader("Cash Flow Analysis")
+
+if not date_cols:
+    st.info("No date-like column detected for cash flow analysis.")
+else:
+    cash_date_col = st.selectbox("Cash flow date column", date_cols)
+    cash_amount_col = st.selectbox("Cash flow amount column", num_cols, key="cash_amount_col")
+    cash_status_col = st.selectbox("Payment status column (optional)", ["(none)"] + status_cols)
+
+    if st.button("Run Cash Flow Analysis"):
+        use_status_col = None if cash_status_col == "(none)" else cash_status_col
+        cf = cash_flow_analysis(df, date_col=cash_date_col, amount_col=cash_amount_col, status_col=use_status_col)
+        st.session_state["cash_flow_df"] = cf
+        if cf.empty:
+            st.warning("Cash flow analysis produced no rows. Check date/amount columns.")
+        else:
+            st.success("Cash flow analysis completed.")
+            st.dataframe(cf, use_container_width=True)
+            st.line_chart(cf.set_index("month")[["paid_amount", "outstanding_amount"]], use_container_width=True)
+
+
+st.subheader("RFM Analysis (Simplified)")
+
+if not date_cols or not customer_cols:
+    st.info("RFM needs both a customer column and a date-like column.")
+else:
+    rfm_customer_col = st.selectbox("RFM customer column", customer_cols)
+    rfm_date_col = st.selectbox("RFM date column", date_cols, key="rfm_date")
+    rfm_amount_col = st.selectbox("RFM monetary column", num_cols, key="rfm_amount")
+
+    if st.button("Run RFM Analysis"):
+        rfm_df = rfm_analysis(df, customer_col=rfm_customer_col, date_col=rfm_date_col, amount_col=rfm_amount_col)
+        st.session_state["rfm_df"] = rfm_df
+        st.session_state["rfm_summary_df"] = rfm_segment_summary(rfm_df)
+        if rfm_df.empty:
+            st.warning("RFM analysis produced no rows. Check customer/date/amount columns.")
+        else:
+            st.success("RFM analysis completed.")
+            st.dataframe(rfm_df.head(30), use_container_width=True)
+            summary = st.session_state["rfm_summary_df"]
+            if not summary.empty:
+                st.bar_chart(summary.set_index("segment")["customers"], use_container_width=True)
