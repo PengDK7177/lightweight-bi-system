@@ -1,13 +1,8 @@
-# 引入 Streamlit，作为整个 BI 系统的 Web 框架
-# Import Streamlit as the Web framework for the entire BI system
 import streamlit as st
-
-# 从各模块引入核心功能函数
-# Import core functions from the project modules
 from modules.data_import import load_csv
 from modules.cleaning import remove_duplicates
 from modules.analytics import calculate_vat
-from modules.auth import init_auth_state, login_form, render_user_sidebar
+from modules.auth import init_auth_state, render_login_page, render_user_sidebar
 
 # 配置页面标题和布局（宽屏模式），必须是 Streamlit 脚本中的第一个调用
 # Configure the page title and layout (wide mode); must be the first Streamlit call in the script
@@ -20,11 +15,9 @@ init_auth_state()
 # 首页同时充当登录入口：若用户未登录则渲染登录表单并停止后续渲染
 # The home page doubles as the login entry point: show the login form and halt if not authenticated
 if not st.session_state.get("authenticated"):
-    st.title("Lightweight BI System")
-    st.markdown("### Login")
-    # 渲染登录表单；成功登录后会自动 rerun，跳过此分支
-    # Render the login form; on success it reruns the app and skips this branch
-    login_form()
+    # 仅渲染独立登录页（隐藏侧边栏导航）
+    # Render only the dedicated login page (sidebar navigation hidden)
+    render_login_page()
     st.stop()
 
 # ---- 以下内容仅对已登录用户可见 ----

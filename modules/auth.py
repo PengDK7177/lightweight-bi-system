@@ -20,6 +20,24 @@ USER_STORE_PATH = Path("data/users.json")
 PBKDF2_ROUNDS = 120_000
 
 
+def _hide_navigation_before_login() -> None:
+    """
+    在未登录状态下隐藏侧边栏与展开控件，确保仅显示登录界面。
+    Hide the sidebar and expand control before authentication so only the login UI is visible.
+    """
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"],
+        [data-testid="collapsedControl"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _hash_password(password: str, salt_hex: str | None = None) -> str:
     """
     使用 PBKDF2-HMAC-SHA256 对密码进行加盐哈希，返回格式为 salt$hash 的字符串。
@@ -219,6 +237,17 @@ def login_form() -> bool:
     return bool(st.session_state.get("authenticated"))
 
 
+def render_login_page() -> None:
+    """
+    渲染独立登录页：未登录时仅显示登录相关内容。
+    Render a dedicated login page: before authentication, show login content only.
+    """
+    _hide_navigation_before_login()
+    st.title("Lightweight BI System")
+    st.markdown("### Login")
+    login_form()
+
+
 def require_login(logout_key: str = "logout") -> None:
     """
     页面守卫：若用户未登录则显示警告并阻止页面继续渲染。
@@ -231,7 +260,8 @@ def require_login(logout_key: str = "logout") -> None:
     # 未登录则显示提示信息并调用 st.stop() 终止后续渲染
     # Show a warning and call st.stop() to halt the page for unauthenticated users
     if not st.session_state.get("authenticated"):
-        st.warning("You must log in first. Please log in on the Home page.")
+        _hide_navigation_before_login()
+        st.switch_page("app.py")
         st.stop()
 
     # 已登录则在侧边栏渲染用户信息和退出按钮
