@@ -175,61 +175,129 @@ def _rfm_score(series: pd.Series, high_is_good: bool = True, bins: int = 4) -> p
 
 def rfm_analysis(df: pd.DataFrame, customer_col: str, date_col: str, amount_col: str) -> pd.DataFrame:
     """
-    计算简化版 RFM 分析结果。
-    Compute a simplified RFM analysis result.
+    计算完整的 RFM 分析结果（Recency/Frequency/Monetary + 业务分层）。
+    Compute a complete RFM analysis result (Recency/Frequency/Monetary + business segmentation).
+
+    输出表包含：
+    The output table includes:
+    - customer_id
+    - recency（天）/ recency in days
+    - frequency（交易次数）/ transaction frequency
+    - monetary（交易总额）/ monetary total
+    - r_score / f_score / m_score（1~3）
+    - rfm_score（3~9）
+    - value_segment（High Value / Medium Value / Low Value）
+    - segment（与 value_segment 同步，供旧页面兼容）
+      segment (same as value_segment for backward compatibility)
     """
+    default_cols = [
+        "customer_id",
+        "recency",
+        "frequency",
+        "monetary",
+        "r_score",
+        "f_score",
+        "m_score",
+        "rfm_score",
+        "value_segment",
+        "segment",
+    ]
+
     if df is None or df.empty:
-        return pd.DataFrame(columns=["customer_id", "recency", "frequency", "monetary", "r_score", "f_score", "m_score", "rfm_score", "segment"])
+        return pd.DataFrame(columns=default_cols)
+
     for col in [customer_col, date_col, amount_col]:
         if col not in df.columns:
-            return pd.DataFrame(columns=["customer_id", "recency", "frequency", "monetary", "r_score", "f_score", "m_score", "rfm_score", "segment"])
+            return pd.DataFrame(columns=default_cols)
 
+    # 基于清洗后的数据副本进行计算，确保不会修改源数据
+    # Compute on a cleaned copy to avoid mutating source data
     out = df.copy()
-    out[amount_col] = pd.to_numeric(out[amount_col], errors="coerce").fillna(0.0)
-    out["_date"] = _best_date_parse(out[date_col])
-    out = out[out["_date"].notna()].copy()
-    out = out[out[customer_col].notna()].copy()
-    if out.empty:
-        return pd.DataFrame(columns=["customer_id", "recency", "frequency", "monetary", "r_score", "f_score", "m_score", "rfm_score", "segment"])
 
+    # 金额列转数值；无法解析的值移除，保证 Monetary 可靠
+    # Convert amount to numeric and drop invalid rows to ensure reliable Monetary values
+    out[amount_col] = pd.to_numeric(out[amount_col], errors="coerce")
+    out["_date"] = _best_date_parse(out[date_col])
+    out["_customer"] = out[customer_col].astype(str).str.strip()
+
+    # 只保留关键字段有效的记录：客户ID、交易日期、交易金额
+    # Keep only rows with valid core fields: customer id, transaction date, transaction amount
+    out = out[
+        out["_date"].notna()
+        & out["_customer"].notna()
+        & (out["_customer"] != "")
+        & out[amount_col].notna()
+    ].copy()
+
+    if out.empty:
+        return pd.DataFrame(columns=default_cols)
+
+    # 快照日期设为数据中的最后交易日 + 1 天（行业常见口径）
+    # Set snapshot date to max transaction date + 1 day (common RFM convention)
     snapshot_date = out["_date"].max() + pd.Timedelta(days=1)
+
+    # 核心 RFM 指标：
+    # Core RFM metrics:
+    # Recency: 距离最近一次交易的天数
+    # Frequency: 交易记录条数
+    # Monetary: 交易总金额
     rfm = (
-        out.groupby(customer_col)
+        out.groupby("_customer", as_index=False)
         .agg(
-            recency=("_date", lambda x: (snapshot_date - x.max()).days),
+            recency=("_date", lambda x: int((snapshot_date - x.max()).days)),
             frequency=("_date", "count"),
             monetary=(amount_col, "sum"),
         )
-        .reset_index()
-        .rename(columns={customer_col: "customer_id"})
+        .rename(columns={"_customer": "customer_id"})
     )
 
-    rfm["r_score"] = _rfm_score(rfm["recency"], high_is_good=False, bins=4)
-    rfm["f_score"] = _rfm_score(rfm["frequency"], high_is_good=True, bins=4)
-    rfm["m_score"] = _rfm_score(rfm["monetary"], high_is_good=True, bins=4)
+    # 使用三分位评分（1~3）形成更易解释的高/中/低价值分层
+    # Use tercile scores (1..3) for an interpretable High/Medium/Low value segmentation
+    rfm["r_score"] = _rfm_score(rfm["recency"], high_is_good=False, bins=3)
+    rfm["f_score"] = _rfm_score(rfm["frequency"], high_is_good=True, bins=3)
+    rfm["m_score"] = _rfm_score(rfm["monetary"], high_is_good=True, bins=3)
     rfm["rfm_score"] = rfm["r_score"] + rfm["f_score"] + rfm["m_score"]
 
-    def _segment(score: int) -> str:
-        if score >= 10:
-            return "Champion"
+    # 业务分层规则（简单直观）：
+    # Business segmentation rule (simple and interpretable):
+    # 8~9: High Value, 5~7: Medium Value, 3~4: Low Value
+    # 8~9: High Value, 5~7: Medium Value, 3~4: Low Value
+    def _value_segment(score: int) -> str:
         if score >= 8:
-            return "Loyal"
-        if score >= 6:
-            return "Potential"
-        return "At Risk"
+            return "High Value"
+        if score >= 5:
+            return "Medium Value"
+        return "Low Value"
 
-    rfm["segment"] = rfm["rfm_score"].apply(_segment)
-    return rfm.sort_values("rfm_score", ascending=False).reset_index(drop=True)
+    rfm["value_segment"] = rfm["rfm_score"].apply(_value_segment)
+
+    # 保留旧字段 segment 以兼容现有页面/图表代码
+    # Keep legacy 'segment' for compatibility with existing pages/charts
+    rfm["segment"] = rfm["value_segment"]
+
+    # 固定列顺序，输出即为可展示/可导出/可视化的完整分析表
+    # Use stable column order so the output is ready for display/export/visualisation
+    rfm = rfm[default_cols].sort_values(
+        ["rfm_score", "monetary", "frequency"], ascending=[False, False, False]
+    )
+    return rfm.reset_index(drop=True)
 
 
 def rfm_segment_summary(rfm_df: pd.DataFrame) -> pd.DataFrame:
     """按用户分群汇总数量与平均消费。Summarise customer segment counts and average spend."""
-    if rfm_df is None or rfm_df.empty or "segment" not in rfm_df.columns:
+    if rfm_df is None or rfm_df.empty:
+        return pd.DataFrame(columns=["segment", "customers", "avg_monetary"])
+
+    # 优先使用新的 value_segment；若不存在则回退到旧字段 segment
+    # Prefer the new value_segment; fall back to legacy segment when necessary
+    segment_col = "value_segment" if "value_segment" in rfm_df.columns else "segment"
+    if segment_col not in rfm_df.columns:
         return pd.DataFrame(columns=["segment", "customers", "avg_monetary"])
 
     summary = (
-        rfm_df.groupby("segment", as_index=False)
+        rfm_df.groupby(segment_col, as_index=False)
         .agg(customers=("customer_id", "count"), avg_monetary=("monetary", "mean"))
         .sort_values("customers", ascending=False)
+        .rename(columns={segment_col: "segment"})
     )
     return summary

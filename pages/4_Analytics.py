@@ -75,6 +75,22 @@ with st.container(border=True):
         # 将含新列的 DataFrame 写回会话状态
         # Write the enriched DataFrame back to session state
         st.session_state["df"] = out
+        # 保存分析结果供 Dashboard 复用，形成“分析 -> 可视化”闭环
+        # Persist analysis outputs for Dashboard reuse to complete the "analysis -> visualisation" flow
+        st.session_state["vat_result_df"] = out
+        vat_summary_df = pd.DataFrame(
+            {
+                "metric": ["net_amount", "vat_amount", "gross_amount"],
+                "value": [
+                    float(pd.to_numeric(out[amount_col], errors="coerce").fillna(0.0).sum()),
+                    float(pd.to_numeric(out["vat_amount"], errors="coerce").fillna(0.0).sum()),
+                    float(pd.to_numeric(out["amount_incl_vat"], errors="coerce").fillna(0.0).sum()),
+                ],
+            }
+        )
+        st.session_state["vat_summary_df"] = vat_summary_df
+        st.session_state["vat_amount_col"] = amount_col
+        st.session_state["vat_rate"] = vat_rate
         st.success("VAT columns added: vat_amount, amount_incl_vat")
         st.dataframe(out.head(30), use_container_width=True)
 
@@ -129,23 +145,52 @@ with st.container(border=True):
         st.info("No customer-like column detected for payment frequency analysis.")
     else:
         freq_customer_col = st.selectbox("Customer column", customer_cols, key="freq_customer_col")
-        freq_series = (
-            df[freq_customer_col]
-            .dropna()
-            .astype(str)
-            .str.strip()
-        )
-        freq_series = freq_series[freq_series != ""]
-        freq_table = freq_series.value_counts().head(20)
 
-        if freq_table.empty:
-            st.info("No valid customer values found in the selected column.")
-        else:
-            st.bar_chart(freq_table, use_container_width=True)
-            st.dataframe(
-                freq_table.rename("payment_count").reset_index().rename(columns={"index": "customer"}),
-                use_container_width=True,
+        def _normalize_customer_frequency_df(raw_df: pd.DataFrame | None) -> pd.DataFrame:
+            """
+            统一客户频次结果列名为 customer / payment_count，避免不同来源导致 KeyError。
+            Normalize customer frequency output columns to customer/payment_count to avoid KeyError across sources.
+            """
+            if raw_df is None or getattr(raw_df, "empty", True):
+                return pd.DataFrame(columns=["customer", "payment_count"])
+
+            out = raw_df.copy()
+            if len(out.columns) < 2:
+                return pd.DataFrame(columns=["customer", "payment_count"])
+
+            # 取前两列并重命名，兼容 [index, count]、[customer_id, count] 等格式
+            # Keep first two columns and rename them to support [index,count] or [customer_id,count]
+            out = out.iloc[:, :2].copy()
+            out.columns = ["customer", "payment_count"]
+            out["customer"] = out["customer"].astype(str)
+            out["payment_count"] = pd.to_numeric(out["payment_count"], errors="coerce").fillna(0)
+            return out
+
+        # 显式运行分析并保存结果，供 Dashboard 直接使用
+        # Run analysis explicitly and store outputs for direct Dashboard consumption
+        if st.button("Run Customer Payment Frequency Analysis"):
+            freq_series = (
+                df[freq_customer_col]
+                .dropna()
+                .astype(str)
+                .str.strip()
             )
+            freq_series = freq_series[freq_series != ""]
+            freq_table = freq_series.value_counts().head(20)
+            # 使用稳定的列名生成结果，避免因原始列名不同导致后续绘图失败
+            # Build with stable column names to prevent downstream plotting failures
+            freq_df = freq_table.reset_index()
+            freq_df.columns = ["customer", "payment_count"]
+            st.session_state["customer_payment_frequency_df"] = freq_df
+            st.session_state["customer_payment_frequency_col"] = freq_customer_col
+
+        freq_df = _normalize_customer_frequency_df(st.session_state.get("customer_payment_frequency_df"))
+        if freq_df is None or freq_df.empty:
+            st.info("Run Customer Payment Frequency Analysis to generate results.")
+        else:
+            st.success("Customer payment frequency analysis completed.")
+            st.bar_chart(freq_df.set_index("customer")["payment_count"], use_container_width=True)
+            st.dataframe(freq_df, use_container_width=True)
 
 st.markdown("")
 
@@ -159,26 +204,53 @@ with st.container(border=True):
         st.info("No payment-status-like column detected.")
     else:
         status_col = st.selectbox("Payment status column", status_cols, key="status_distribution_col")
-        status_series = df[status_col].dropna().astype(str).str.strip()
-        status_series = status_series[status_series != ""]
-        status_dist = status_series.value_counts()
 
-        if status_dist.empty:
-            st.info("No valid payment-status values found in the selected column.")
+        def _normalize_status_distribution_df(raw_df: pd.DataFrame | None) -> pd.DataFrame:
+            """
+            统一状态分布结果列名为 payment_status / count，避免会话中历史结构引发异常。
+            Normalize status distribution columns to payment_status/count to avoid errors with legacy session shapes.
+            """
+            if raw_df is None or getattr(raw_df, "empty", True):
+                return pd.DataFrame(columns=["payment_status", "count"])
+
+            out = raw_df.copy()
+            if len(out.columns) < 2:
+                return pd.DataFrame(columns=["payment_status", "count"])
+
+            out = out.iloc[:, :2].copy()
+            out.columns = ["payment_status", "count"]
+            out["payment_status"] = out["payment_status"].astype(str)
+            out["count"] = pd.to_numeric(out["count"], errors="coerce").fillna(0)
+            return out
+
+        # 显式运行状态分布分析并保存结果，供 Dashboard 直接读取
+        # Run status-distribution analysis explicitly and persist outputs for Dashboard
+        if st.button("Run Payment Status Distribution Analysis"):
+            status_series = df[status_col].dropna().astype(str).str.strip()
+            status_series = status_series[status_series != ""]
+            status_dist = status_series.value_counts()
+            # 使用稳定的列名生成结果，兼容 pandas 不同命名行为
+            # Use stable column names to stay compatible with different pandas naming behavior
+            status_df = status_dist.reset_index()
+            status_df.columns = ["payment_status", "count"]
+            st.session_state["payment_status_distribution_df"] = status_df
+            st.session_state["payment_status_col"] = status_col
+
+        status_df = _normalize_status_distribution_df(st.session_state.get("payment_status_distribution_df"))
+        if status_df is None or status_df.empty:
+            st.info("Run Payment Status Distribution Analysis to generate results.")
         else:
-            st.bar_chart(status_dist, use_container_width=True)
-            st.dataframe(
-                status_dist.rename("count").reset_index().rename(columns={"index": "payment_status"}),
-                use_container_width=True,
-            )
+            st.success("Payment status distribution analysis completed.")
+            st.bar_chart(status_df.set_index("payment_status")["count"], use_container_width=True)
+            st.dataframe(status_df, use_container_width=True)
 
 st.markdown("")
 
 with st.container(border=True):
-    st.subheader("RFM Analysis (Simplified)")
-    # 简短说明：按最近一次消费、消费频次和金额做客户分群
-    # Short description: segment customers by recency, frequency, and monetary value
-    st.caption("Group customers by recency, frequency, and monetary value for retention planning.")
+    st.subheader("RFM Customer Analysis")
+    # 简短说明：基于清洗后数据生成完整 RFM 分析表，并输出高/中/低价值客户分层
+    # Short description: build a complete RFM table from cleaned data and assign High/Medium/Low value segments
+    st.caption("Generate a complete customer-level RFM result from cleaned data (customer ID, date, amount).")
 
     if not date_cols or not customer_cols:
         st.info("RFM needs both a customer column and a date-like column.")
@@ -190,11 +262,19 @@ with st.container(border=True):
         if st.button("Run RFM Analysis"):
             rfm_df = rfm_analysis(df, customer_col=rfm_customer_col, date_col=rfm_date_col, amount_col=rfm_amount_col)
             st.session_state["rfm_df"] = rfm_df
+            # 保存“完整 RFM 分析表”供 Dashboard 与后续导出功能直接复用
+            # Persist the complete RFM analytical table for Dashboard and future export features
+            st.session_state["rfm_result_df"] = rfm_df
             st.session_state["rfm_summary_df"] = rfm_segment_summary(rfm_df)
+            st.session_state["rfm_config"] = {
+                "customer_col": rfm_customer_col,
+                "date_col": rfm_date_col,
+                "amount_col": rfm_amount_col,
+            }
             if rfm_df.empty:
                 st.warning("RFM analysis produced no rows. Check customer/date/amount columns.")
             else:
-                st.success("RFM analysis completed.")
+                st.success("RFM analysis completed. Full customer-level table is ready for Dashboard and export.")
                 st.dataframe(rfm_df.head(30), use_container_width=True)
                 summary = st.session_state["rfm_summary_df"]
                 if not summary.empty:
