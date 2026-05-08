@@ -64,9 +64,9 @@ strategy = missing_value_options[selected_option_label]
 # 为每个选项提供简短说明，帮助 SME 用户理解对数据的影响
 # Provide short explanations for each option so SME users understand the data impact
 missing_value_explanations = {
-    "Remove rows with missing values": "Rows that have any empty cells will be deleted from the dataset. / 包含空白单元格的整行会被删除。",
-    "Replace missing values with 0": "Empty cells will be replaced with 0, useful when 0 is a meaningful value. / 空白单元格会替换为 0，适用于 0 有业务含义的场景。",
-    "Fill using the previous available value": "Each empty cell is filled with the value from the previous row in the same column. / 每个空白单元格会用同一列上一行的值进行填充。",
+    "Remove rows with missing values": "Rows that have any empty cells will be deleted from the dataset.",
+    "Replace missing values with 0": "Empty cells will be replaced with 0, useful when 0 is a meaningful value.",
+    "Fill using the previous available value": "Each empty cell is filled with the value from the previous row in the same column.",
 }
 st.caption(f"Explanation: {missing_value_explanations[selected_option_label]}")
 

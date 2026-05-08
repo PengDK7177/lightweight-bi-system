@@ -1,5 +1,9 @@
 # 引入 Streamlit 用于构建页面 UI
 # Import Streamlit for building the page UI
+from datetime import datetime
+import importlib.util
+from io import BytesIO
+
 import streamlit as st
 import pandas as pd
 
@@ -27,6 +31,8 @@ customer_freq_df = st.session_state.get("customer_payment_frequency_df")
 status_dist_df = st.session_state.get("payment_status_distribution_df")
 rfm_summary_df = st.session_state.get("rfm_summary_df")
 rfm_result_df = st.session_state.get("rfm_result_df")
+vat_result_df = st.session_state.get("vat_result_df")
+cleaned_df = st.session_state.get("df")
 
 
 def _normalize_two_col_df(raw_df: pd.DataFrame | None, col1: str, col2: str) -> pd.DataFrame:
@@ -91,6 +97,279 @@ def _safe_count_from_rfm(rfm_df: pd.DataFrame | None) -> int:
         return 0
     return int(pd.to_numeric(rfm_df["frequency"], errors="coerce").fillna(0).sum())
 
+
+def _build_export_workbook_bytes() -> tuple[bytes | None, list[str]]:
+    """
+    将当前会话中的关键分析结果打包为一个结构化 Excel 文件（多工作表）。
+    Build a structured multi-sheet Excel workbook from current in-session analysis outputs.
+
+    返回 / Returns:
+    - workbook bytes（无可导出内容时为 None）
+      Workbook bytes (None when nothing exportable exists)
+    - 已写入的工作表名称列表
+      List of written sheet names
+    """
+    sheets_to_export: list[tuple[str, pd.DataFrame]] = []
+
+    # 仅导出“处理后有业务意义”的结果，避免原始未保护输入泄露
+    # Export only processed business-meaningful outputs to avoid leaking raw unprotected input
+    if isinstance(cleaned_df, pd.DataFrame) and not cleaned_df.empty:
+        sheets_to_export.append(("cleaned_dataset", cleaned_df))
+    if isinstance(vat_result_df, pd.DataFrame) and not vat_result_df.empty:
+        sheets_to_export.append(("vat_result", vat_result_df))
+    if isinstance(vat_summary_df, pd.DataFrame) and not vat_summary_df.empty:
+        sheets_to_export.append(("vat_summary", vat_summary_df))
+    if isinstance(cash_flow_df, pd.DataFrame) and not cash_flow_df.empty:
+        sheets_to_export.append(("cash_flow_summary", cash_flow_df))
+    if isinstance(customer_freq_df, pd.DataFrame) and not customer_freq_df.empty:
+        sheets_to_export.append(("customer_frequency", customer_freq_df))
+    if isinstance(status_dist_df, pd.DataFrame) and not status_dist_df.empty:
+        sheets_to_export.append(("payment_status", status_dist_df))
+    if isinstance(rfm_result_df, pd.DataFrame) and not rfm_result_df.empty:
+        sheets_to_export.append(("rfm_table", rfm_result_df))
+    if isinstance(rfm_summary_df, pd.DataFrame) and not rfm_summary_df.empty:
+        sheets_to_export.append(("rfm_summary", rfm_summary_df))
+
+    if not sheets_to_export:
+        return None, []
+
+    # 生成导出说明页，标注导出时间与数据来源，便于报表追踪
+    # Add an export-readme sheet with timestamp and source notes for report traceability
+    meta_rows = [
+        {"item": "exported_at", "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        {"item": "source", "value": "Current session Analytics outputs"},
+        {"item": "cleaned_dataset_included", "value": str(isinstance(cleaned_df, pd.DataFrame) and not cleaned_df.empty)},
+        {"item": "pii_masked_flag", "value": str(bool(st.session_state.get("pii_masked", False)))},
+        {"item": "notes", "value": "Export includes processed data and analysis results ready for reporting."},
+    ]
+    meta_df = pd.DataFrame(meta_rows)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        meta_df.to_excel(writer, index=False, sheet_name="export_readme")
+        for sheet_name, df_obj in sheets_to_export:
+            # Excel 工作表名最长 31 字符，这里做长度保护
+            # Excel sheet names are limited to 31 chars; keep names within limit
+            safe_name = sheet_name[:31]
+            df_obj.to_excel(writer, index=False, sheet_name=safe_name)
+
+    return output.getvalue(), [name for name, _ in sheets_to_export]
+
+
+def _chart_image_from_series(series: pd.Series, chart_type: str, title: str) -> BytesIO | None:
+    """
+    将序列数据渲染为图像内存流，供 PDF 报告嵌入。
+    Render a series into an in-memory chart image stream for PDF embedding.
+    """
+    if series is None or len(series) == 0:
+        return None
+
+    # 延迟导入，避免编辑器环境与运行环境不一致时产生导入告警
+    # Lazy import to avoid editor warnings when analysis/runtime environments differ
+    import matplotlib.pyplot as plt
+
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(6.5, 3.2))
+    if chart_type == "pie":
+        ax.pie(s.values, labels=[str(x) for x in s.index], autopct="%1.1f%%", startangle=120)
+        ax.axis("equal")
+    elif chart_type == "line":
+        ax.plot(s.index.astype(str), s.values, marker="o")
+        ax.tick_params(axis="x", rotation=45)
+    else:
+        ax.bar([str(x) for x in s.index], s.values)
+        ax.tick_params(axis="x", rotation=45)
+
+    ax.set_title(title)
+    fig.tight_layout()
+
+    out = BytesIO()
+    fig.savefig(out, format="png", dpi=160)
+    plt.close(fig)
+    out.seek(0)
+    return out
+
+
+def _table_for_pdf(df: pd.DataFrame, max_rows: int = 12):
+    """
+    将 DataFrame 转为 PDF 表格对象，限制行数以保持可读性。
+    Convert a DataFrame into a PDF table and limit rows for readability.
+    """
+    preview = df.head(max_rows).copy()
+    preview = preview.fillna("")
+    data = [list(preview.columns)] + preview.values.tolist()
+    from reportlab.lib import colors
+    from reportlab.platypus import Table, TableStyle
+
+    table = Table(data, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef5")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1f3a56")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d0d7de")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    return table
+
+
+def _build_pdf_report_bytes(
+    total_revenue: float,
+    total_vat: float,
+    number_of_orders: int,
+    number_of_customers: int,
+) -> bytes | None:
+    """
+    基于当前会话分析结果构建结构化 PDF 报告。
+    Build a structured PDF report from current in-session analytical outputs.
+    """
+    has_any = any(
+        isinstance(x, pd.DataFrame) and not x.empty
+        for x in [cleaned_df, vat_summary_df, cash_flow_df, customer_freq_df, status_dist_df, rfm_summary_df, rfm_result_df]
+    )
+    if not has_any:
+        return None
+
+    # 延迟导入 PDF 相关库，确保只有在触发 PDF 导出时才加载
+    # Lazy import PDF libraries so they are loaded only when PDF export is requested
+    try:
+        import matplotlib.pyplot as plt
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Image as RLImage
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+    except ModuleNotFoundError:
+        # 缺少依赖时返回 None，交由界面层提示，不中断 Dashboard 主流程
+        # Return None when dependencies are missing so UI can warn users without breaking Dashboard
+        return None
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    # 报告头部：标题、时间、上下文
+    # Report header: title, generation time, and context
+    story.append(Paragraph("Lightweight BI Analytical Report", styles["Title"]))
+    story.append(Spacer(1, 0.25 * cm))
+    story.append(Paragraph(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles["Normal"]))
+    story.append(Paragraph("Context: Current session outputs from cleaned data and Analytics module.", styles["Normal"]))
+    story.append(Paragraph(f"PII masked flag: {bool(st.session_state.get('pii_masked', False))}", styles["Normal"]))
+    story.append(Spacer(1, 0.4 * cm))
+
+    # KPI 汇总
+    # KPI summary
+    story.append(Paragraph("KPI Summary", styles["Heading2"]))
+    kpi_df = pd.DataFrame(
+        {
+            "KPI": ["Total Revenue", "Total VAT", "Number of Orders", "Number of Customers"],
+            "Value": [f"{total_revenue:,.2f}", f"{total_vat:,.2f}", f"{number_of_orders:,}", f"{number_of_customers:,}"],
+        }
+    )
+    story.append(_table_for_pdf(kpi_df, max_rows=10))
+    story.append(Spacer(1, 0.4 * cm))
+
+    # Financial Analysis
+    # Financial Analysis
+    story.append(Paragraph("Financial Analysis", styles["Heading2"]))
+    if isinstance(vat_summary_df, pd.DataFrame) and not vat_summary_df.empty:
+        story.append(Paragraph("VAT Summary", styles["Heading3"]))
+        story.append(_table_for_pdf(vat_summary_df, max_rows=12))
+        vat_series = vat_summary_df.set_index("metric")["value"] if {"metric", "value"}.issubset(vat_summary_df.columns) else None
+        vat_img = _chart_image_from_series(vat_series, chart_type="bar", title="VAT Summary") if vat_series is not None else None
+        if vat_img:
+            story.append(Spacer(1, 0.15 * cm))
+            story.append(RLImage(vat_img, width=15 * cm, height=6 * cm))
+        story.append(Spacer(1, 0.25 * cm))
+
+    if isinstance(cash_flow_df, pd.DataFrame) and not cash_flow_df.empty:
+        story.append(Paragraph("Cash Flow Summary", styles["Heading3"]))
+        story.append(_table_for_pdf(cash_flow_df, max_rows=12))
+        if {"month", "paid_amount", "outstanding_amount"}.issubset(cash_flow_df.columns):
+            # 现金流趋势图：使用已分析结果中的 paid/outstanding 两条线
+            # Cash-flow trend chart: two lines from analysed paid/outstanding outputs
+            fig, ax = plt.subplots(figsize=(6.5, 3.2))
+            cf_plot = cash_flow_df.copy()
+            ax.plot(cf_plot["month"].astype(str), pd.to_numeric(cf_plot["paid_amount"], errors="coerce").fillna(0), marker="o", label="paid")
+            ax.plot(cf_plot["month"].astype(str), pd.to_numeric(cf_plot["outstanding_amount"], errors="coerce").fillna(0), marker="o", label="outstanding")
+            ax.set_title("Cash Flow Trend")
+            ax.legend()
+            ax.tick_params(axis="x", rotation=45)
+            fig.tight_layout()
+            cf_img = BytesIO()
+            fig.savefig(cf_img, format="png", dpi=160)
+            plt.close(fig)
+            cf_img.seek(0)
+            story.append(Spacer(1, 0.15 * cm))
+            story.append(RLImage(cf_img, width=15 * cm, height=6 * cm))
+        story.append(Spacer(1, 0.4 * cm))
+
+    # Customer Analysis
+    # Customer Analysis
+    story.append(Paragraph("Customer Analysis", styles["Heading2"]))
+    if isinstance(customer_freq_df, pd.DataFrame) and not customer_freq_df.empty:
+        story.append(Paragraph("Customer Payment Frequency", styles["Heading3"]))
+        story.append(_table_for_pdf(customer_freq_df, max_rows=12))
+        if {"customer", "payment_count"}.issubset(customer_freq_df.columns):
+            freq_series = customer_freq_df.set_index("customer")["payment_count"]
+            freq_img = _chart_image_from_series(freq_series, chart_type="bar", title="Customer Payment Frequency")
+            if freq_img:
+                story.append(Spacer(1, 0.15 * cm))
+                story.append(RLImage(freq_img, width=15 * cm, height=6 * cm))
+        story.append(Spacer(1, 0.25 * cm))
+
+    if isinstance(status_dist_df, pd.DataFrame) and not status_dist_df.empty:
+        story.append(Paragraph("Payment Status Distribution", styles["Heading3"]))
+        story.append(_table_for_pdf(status_dist_df, max_rows=12))
+        if {"payment_status", "count"}.issubset(status_dist_df.columns):
+            status_series = status_dist_df.set_index("payment_status")["count"]
+            status_img = _chart_image_from_series(status_series, chart_type="pie", title="Payment Status Distribution")
+            if status_img:
+                story.append(Spacer(1, 0.15 * cm))
+                story.append(RLImage(status_img, width=13 * cm, height=6 * cm))
+        story.append(Spacer(1, 0.25 * cm))
+
+    if isinstance(rfm_summary_df, pd.DataFrame) and not rfm_summary_df.empty:
+        story.append(Paragraph("RFM Segment Summary", styles["Heading3"]))
+        story.append(_table_for_pdf(rfm_summary_df, max_rows=12))
+        if {"segment", "customers"}.issubset(rfm_summary_df.columns):
+            rfm_series = rfm_summary_df.set_index("segment")["customers"]
+            rfm_img = _chart_image_from_series(rfm_series, chart_type="bar", title="RFM Segment Distribution")
+            if rfm_img:
+                story.append(Spacer(1, 0.15 * cm))
+                story.append(RLImage(rfm_img, width=15 * cm, height=6 * cm))
+        story.append(Spacer(1, 0.25 * cm))
+
+    if isinstance(rfm_result_df, pd.DataFrame) and not rfm_result_df.empty:
+        story.append(Paragraph("RFM Detailed Table (Top Rows)", styles["Heading3"]))
+        story.append(_table_for_pdf(rfm_result_df, max_rows=20))
+
+    # 清洗数据摘要：仅导出摘要信息，避免 PDF 体积过大
+    # Cleaned-data summary: include concise summary only to keep PDF compact
+    if isinstance(cleaned_df, pd.DataFrame) and not cleaned_df.empty:
+        story.append(Spacer(1, 0.4 * cm))
+        story.append(Paragraph("Cleaned Dataset Summary", styles["Heading2"]))
+        summary_df = pd.DataFrame(
+            {
+                "item": ["rows", "columns"],
+                "value": [int(cleaned_df.shape[0]), int(cleaned_df.shape[1])],
+            }
+        )
+        story.append(_table_for_pdf(summary_df, max_rows=5))
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=A4, rightMargin=1.4 * cm, leftMargin=1.4 * cm, topMargin=1.4 * cm, bottomMargin=1.4 * cm)
+    doc.build(story)
+    return output.getvalue()
+
 # 检查是否至少有一个分析结果可供可视化
 # Check whether at least one analysis output is available for visualisation
 if all(
@@ -100,6 +379,84 @@ if all(
     st.warning("No analytics outputs found. Please run analyses on the Analytics page first.")
     st.stop()
 
+# 统一计算 KPI，供页面展示和导出函数复用，避免重复逻辑
+# Compute KPI values once for both on-screen display and export functions
+total_revenue = _metric_from_vat_summary(vat_summary_df, "net_amount")
+if total_revenue == 0.0 and cash_flow_df is not None and not cash_flow_df.empty and "total_amount" in cash_flow_df.columns:
+    total_revenue = float(pd.to_numeric(cash_flow_df["total_amount"], errors="coerce").fillna(0).sum())
+
+total_vat = _metric_from_vat_summary(vat_summary_df, "vat_amount")
+number_of_orders = _safe_count_from_rfm(rfm_result_df)
+if number_of_orders == 0:
+    number_of_orders = _safe_count_from_frequency(customer_freq_df)
+number_of_customers = int(len(rfm_result_df)) if rfm_result_df is not None and not rfm_result_df.empty else 0
+
+# 检查 PDF 导出依赖是否可用，避免缺包导致页面崩溃
+# Check PDF export dependencies to prevent page crashes when packages are missing
+pdf_deps_ready = (
+    importlib.util.find_spec("matplotlib") is not None
+    and importlib.util.find_spec("reportlab") is not None
+)
+
+with st.container(border=True):
+    st.subheader("Export Report")
+    # 导出模块将当前页面使用的“最新分析结果”打包到 Excel，支持线下复核与共享
+    # Export the latest analysis outputs used by this dashboard into Excel for offline review and sharing
+    st.caption("Download a structured Excel report containing cleaned data and current analytical outputs.")
+
+    # 若尚未执行 PII 脱敏，给出显式提醒（仍允许导出，避免阻断流程）
+    # Show an explicit reminder when PII masking has not been run yet (export remains available)
+    if not st.session_state.get("pii_masked", False):
+        st.warning("PII masking flag is not set. Consider running 'Mask PII (Email & Phone)' before exporting.")
+
+    export_bytes, exported_sheet_names = _build_export_workbook_bytes()
+    pdf_bytes = None
+    if pdf_deps_ready:
+        pdf_bytes = _build_pdf_report_bytes(
+            total_revenue=total_revenue,
+            total_vat=total_vat,
+            number_of_orders=number_of_orders,
+            number_of_customers=number_of_customers,
+        )
+
+    if export_bytes is None and pdf_bytes is None:
+        st.info("No processed outputs are available for export yet.")
+    else:
+        if export_bytes is not None:
+            st.write("Included Excel sheets:", ", ".join(exported_sheet_names))
+
+        # 并排提供 Excel / PDF 下载，增强报告分享可用性
+        # Provide Excel/PDF downloads side-by-side for practical reporting and sharing
+        exp_col1, exp_col2 = st.columns(2)
+        with exp_col1:
+            if export_bytes is not None:
+                st.download_button(
+                    label="Download Excel Report (.xlsx)",
+                    data=export_bytes,
+                    file_name=f"bi_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            else:
+                st.info("Excel export is unavailable for current state.")
+
+        with exp_col2:
+            if pdf_bytes is not None:
+                st.download_button(
+                    label="Download PDF Report (.pdf)",
+                    data=pdf_bytes,
+                    file_name=f"bi_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            else:
+                if not pdf_deps_ready:
+                    st.warning("PDF export dependencies are missing in the active environment (matplotlib, reportlab).")
+                else:
+                    st.info("PDF export is unavailable for current state.")
+
+st.markdown("")
+
 with st.container(border=True):
     # ---- KPI Summary ----
     # ---- KPI Summary ----
@@ -108,20 +465,6 @@ with st.container(border=True):
         # KPI 区仅使用 Analytics 结果，确保指标来源统一
         # KPI section uses only Analytics outputs to keep metric provenance consistent
         st.caption("Business snapshot generated from Analytics outputs: revenue, VAT, orders, and customers.")
-
-        total_revenue = _metric_from_vat_summary(vat_summary_df, "net_amount")
-        if total_revenue == 0.0 and cash_flow_df is not None and not cash_flow_df.empty and "total_amount" in cash_flow_df.columns:
-            # VAT 未运行时回退到现金流总额（仍来自 Analytics 输出）
-            # Fallback to cash-flow total when VAT has not been run (still sourced from Analytics output)
-            total_revenue = float(pd.to_numeric(cash_flow_df["total_amount"], errors="coerce").fillna(0).sum())
-
-        total_vat = _metric_from_vat_summary(vat_summary_df, "vat_amount")
-        # 订单数优先使用 RFM 明细频次总和（全量）；若无 RFM 结果再回退到客户频次结果
-        # Use full-order count from RFM detail first; fall back to customer frequency output when needed
-        number_of_orders = _safe_count_from_rfm(rfm_result_df)
-        if number_of_orders == 0:
-            number_of_orders = _safe_count_from_frequency(customer_freq_df)
-        number_of_customers = int(len(rfm_result_df)) if rfm_result_df is not None and not rfm_result_df.empty else 0
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Revenue", f"{total_revenue:,.2f}")

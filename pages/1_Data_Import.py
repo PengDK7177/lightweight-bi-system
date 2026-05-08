@@ -1,22 +1,9 @@
-# 引入 Streamlit 用于构建页面 UI
-# Import Streamlit for building the page UI
+
 import streamlit as st
-
-# 引入 pandas（此页面通过 load_csv 间接使用）
-# Import pandas (used indirectly via load_csv on this page)
 import pandas as pd
-
-# 引入 Path，用于跨平台文件路径操作
-# Import Path for cross-platform file path operations
 from pathlib import Path
-
-# 从数据导入模块引入加载工具函数
-# Import the data loading utility from the data_import module
 from modules.data_import import load_csv
-
-# 引入登录守卫，确保只有已登录用户才能访问此页面
-# Import the login guard to ensure only authenticated users can access this page
-from modules.auth import require_login
+from modules.auth import require_login, clear_dataset_state
 
 # 若用户未登录则阻止页面继续渲染，并在侧边栏显示用户信息
 # Halt page rendering for unauthenticated users and show user info in the sidebar
@@ -66,6 +53,41 @@ if df is not None:
         df.to_csv("data/processed/imported_data.csv", index=False)
         st.success("Saved.")
 else:
-    # 未加载任何数据时显示引导提示
-    # Show a guide message when no data has been loaded yet
     st.info("Please upload or select a local file.")
+
+# ── Dataset Deletion ─────────────────────────────────────────────────────────
+st.divider()
+st.subheader("Delete Current Dataset")
+st.caption(
+    "Removes the loaded dataset and all derived outputs (cleaning, analytics, "
+    "dashboard, export) from the current session. This action cannot be undone."
+)
+
+# Two-step confirmation: first click reveals the real delete button so users
+# cannot trigger deletion by accidentally clicking once.
+if st.session_state.get("df") is None:
+    st.info("No dataset is currently loaded.")
+else:
+    if "_confirm_delete" not in st.session_state:
+        st.session_state["_confirm_delete"] = False
+
+    if not st.session_state["_confirm_delete"]:
+        if st.button("🗑️ Delete Dataset", type="secondary"):
+            st.session_state["_confirm_delete"] = True
+            st.rerun()
+    else:
+        st.warning(
+            "Are you sure? This will clear the dataset and **all** analytics results "
+            "(VAT, cash flow, RFM, dashboard). This cannot be undone."
+        )
+        col_confirm, col_cancel, _ = st.columns([1, 1, 3])
+        with col_confirm:
+            if st.button("✅ Yes, delete", type="primary"):
+                st.session_state.pop("_confirm_delete", None)
+                clear_dataset_state()
+                st.success("Dataset and all derived outputs have been removed from the session.")
+                st.rerun()
+        with col_cancel:
+            if st.button("Cancel"):
+                st.session_state["_confirm_delete"] = False
+                st.rerun()

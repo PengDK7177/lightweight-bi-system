@@ -203,48 +203,155 @@ def render_user_sidebar(logout_key: str = "logout") -> None:
 
 def login_form() -> bool:
     """
-    渲染登录表单，验证成功后更新会话状态并重新加载应用。
-    Render the login form; update session state and rerun the app on successful authentication.
+    渲染居中卡片式登录表单，验证成功后更新会话状态并重新加载应用。
+    Render a centred card-style login form; update session state and rerun on success.
     """
-    st.subheader("Account Login")
+    # ── Card container CSS ──────────────────────────────────────────────────
+    st.markdown(
+        """
+        <style>
+        /* Full-page grey background */
+        [data-testid="stAppViewContainer"] {
+            background-color: #f0f2f6;
+        }
+        [data-testid="stHeader"] { background: transparent; }
 
-    # 使用 Streamlit 表单组件收集用户名和密码，避免每次输入都触发页面刷新
-    # Use a Streamlit form to collect credentials without triggering a rerun on every keystroke
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login")
+        /* Centred card wrapper */
+        .login-card-outer {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 80vh;
+            padding: 1rem;
+        }
+        .login-card {
+            background: #ffffff;
+            border-radius: 16px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+            padding: 2.8rem 2.6rem 2.2rem 2.6rem;
+            width: 100%;
+            max-width: 420px;
+        }
+        .login-card h2 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.1rem;
+            color: #111;
+        }
+        .login-card .subtitle {
+            color: #555;
+            font-size: 1rem;
+            margin-bottom: 1.6rem;
+        }
 
-    # 仅在用户点击提交按钮后才执行认证逻辑
-    # Only run authentication logic when the submit button has been pressed
+        /* Push Streamlit form widgets inside the card column */
+        div[data-testid="column"]:nth-child(2) .stTextInput input {
+            border-radius: 8px;
+            border: 1px solid #dde1ea;
+            padding: 0.55rem 0.8rem;
+            font-size: 0.95rem;
+        }
+        div[data-testid="column"]:nth-child(2) .stFormSubmitButton button {
+            width: 100%;
+            background-color: #2c2cf0;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 0.65rem;
+            font-size: 1rem;
+            font-weight: 600;
+            margin-top: 0.4rem;
+            cursor: pointer;
+        }
+        div[data-testid="column"]:nth-child(2) .stFormSubmitButton button:hover {
+            background-color: #1a1ae0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Three-column layout: blank | card | blank  (ratio 1:1.4:1)
+    _, mid, _ = st.columns([1, 1.4, 1])
+
+    with mid:
+        st.markdown(
+            '<div class="login-card">'
+            '<h2>Login</h2>'
+            '<p class="subtitle">to get started</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.form("login_form"):
+            username = st.text_input("Username", placeholder="Username")
+            password = st.text_input("Password", type="password", placeholder="Password")
+            submitted = st.form_submit_button("Login", use_container_width=True)
+
+        st.caption("Default account (first run): **admin** / **admin123**")
+
+    # Authentication logic (outside the column so session state writes are safe)
     if submitted:
         user = authenticate_local_user(username, password)
         if user:
-            # 认证成功：写入会话状态并立即重新渲染，跳转到主界面
-            # Authentication succeeded: persist state and rerun to navigate to the main UI
             st.session_state["authenticated"] = True
             st.session_state["username"] = user.get("username")
-            st.success("Login successful")
             st.rerun()
         else:
-            # 认证失败：显示通用错误信息，不透露失败原因
-            # Authentication failed: show a generic error message to avoid leaking details
-            st.error("Invalid username or password")
+            with mid:
+                st.error("Invalid username or password")
 
-    # 提示首次启动时的默认账户，方便演示和测试
-    # Hint at the default account for first-run demos and testing
-    st.caption("Default account (first run): admin / admin123")
     return bool(st.session_state.get("authenticated"))
+
+
+# ── Complete list of dataset-related session-state keys ──────────────────────
+# All keys that any page writes when loading, cleaning, analysing, or exporting
+# data.  Keeping them in one place ensures the delete operation is always in
+# sync with the rest of the application.
+_DATASET_STATE_KEYS: list[str] = [
+    # Core dataset
+    "df",
+    # PII flag
+    "pii_masked",
+    # VAT analysis
+    "vat_result_df",
+    "vat_summary_df",
+    "vat_amount_col",
+    "vat_rate",
+    # Cash-flow analysis
+    "cash_flow_df",
+    # Customer-frequency analysis
+    "customer_payment_frequency_df",
+    "customer_payment_frequency_col",
+    # Payment-status distribution
+    "payment_status_distribution_df",
+    "payment_status_col",
+    # RFM segmentation
+    "rfm_df",
+    "rfm_result_df",
+    "rfm_summary_df",
+    "rfm_config",
+]
+
+
+def clear_dataset_state() -> None:
+    """
+    从 Streamlit 会话状态中移除所有与当前数据集相关的键，
+    使系统恢复到"未加载任何数据集"的初始状态。
+    Remove all dataset-related keys from Streamlit session state so that
+    preview, analytics, dashboard, and export modules all see a clean
+    'no dataset loaded' state.  Authentication keys are left untouched.
+    """
+    for key in _DATASET_STATE_KEYS:
+        st.session_state.pop(key, None)
 
 
 def render_login_page() -> None:
     """
-    渲染独立登录页：未登录时仅显示登录相关内容。
-    Render a dedicated login page: before authentication, show login content only.
+    渲染独立登录页：未登录时仅显示居中卡片登录界面。
+    Render the dedicated login page: show only the centred card login UI.
     """
     _hide_navigation_before_login()
-    st.title("Lightweight BI System")
-    st.markdown("### Login")
     login_form()
 
 
