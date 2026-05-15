@@ -21,30 +21,167 @@ def remove_duplicates(df: pd.DataFrame, subset=None) -> pd.DataFrame:
     return df.drop_duplicates(subset=subset).reset_index(drop=True)
 
 
-def fill_missing(df: pd.DataFrame, strategy: str = "drop") -> pd.DataFrame:
+def _detect_column_type(col_name: str, col_series: pd.Series) -> str:
     """
-    使用指定策略处理缺失值，支持 drop（删除）、zero（填零）、ffill（前向填充）三种方式。
-    Handle missing values using one of three strategies: drop, zero, or ffill (forward-fill).
-    """
-    # 若 DataFrame 为空则直接返回，无需处理
-    # Return early if the DataFrame is None or empty
-    if df is None or df.empty:
-        return df
-
-# Strategy 'drop': remove any row that contains at least one missing value, then reset the index
-    if strategy == "drop":
-        return df.dropna().reset_index(drop=True)
-
-# Strategy 'zero': replace all missing values with 0, suitable for numeric data
-    if strategy == "zero":
-        return df.fillna(0)
-
-# Strategy 'ffill': forward-fill with the previous row's value, then back-fill to cover leading NaNs
-    if strategy == "ffill":
-        return df.ffill().bfill()
-
+    根据列名和数据特征自动检测列的类型，用于判断最合适的缺失值处理策略。
+    Auto-detect column type based on name and data characteristics to choose optimal missing-value strategy.
     
-    return df
+    返回值 / Returns:
+        - "countable": 计数类列（销量、订单数等）→ 建议 zero
+        - "financial": 财务数据（收入、成本等）→ 建议 drop/mark
+        - "date": 日期列 → 建议 ffill/drop
+        - "categorical": 分类列 → 建议 ffill/mode
+        - "id": ID列 → 建议 drop
+        - "other": 其他 → 默认 drop
+    """
+    col_lower = col_name.lower()
+    
+    # 规则 1：根据列名关键词识别
+    # Rule 1: Detect by column name keywords
+    countable_hints = {"quantity", "count", "num", "amount_count", "order_count", "sale_count", "total_items"}
+    financial_hints = {"price", "revenue", "cost", "fee", "salary", "income", "payment", "balance", "profit"}
+    date_hints = {"date", "time", "datetime", "timestamp", "created", "updated", "start", "end"}
+    id_hints = {"id", "identifier", "code"}
+    categorical_hints = {"category", "type", "status", "name", "country", "city", "region"}
+    
+    if any(hint in col_lower for hint in id_hints):
+        return "id"
+    if any(hint in col_lower for hint in date_hints):
+        return "date"
+    if any(hint in col_lower for hint in countable_hints):
+        return "countable"
+    if any(hint in col_lower for hint in financial_hints):
+        return "financial"
+    if any(hint in col_lower for hint in categorical_hints):
+        return "categorical"
+    
+    # 规则 2：根据数据类型推断
+    # Rule 2: Infer from data type
+    if pd.api.types.is_integer_dtype(col_series):
+        return "countable"  # 整数通常是计数
+    if pd.api.types.is_float_dtype(col_series):
+        return "financial"  # 浮点数倾向于财务数据
+    if pd.api.types.is_datetime64_any_dtype(col_series):
+        return "date"
+    if pd.api.types.is_object_dtype(col_series) or pd.api.types.is_string_dtype(col_series):
+        return "categorical"
+    
+    return "other"
+
+
+def fill_missing(
+    df: pd.DataFrame,
+    strategy: str | dict = "auto",
+    return_info: bool = False
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
+    """
+    处理缺失值，支持按列指定不同的策略，或使用自动检测。
+    Handle missing values with per-column strategies or auto-detection.
+    
+    参数 / Args:
+        df: 输入 DataFrame
+        strategy: 处理策略，可以是：
+            - "auto": 自动根据列类型检测（推荐）
+            - "drop": 删除含缺失值的行（全局）
+            - "zero": 填零（全局，仅数值列）
+            - "ffill": 前向填充（全局）
+            - 字典格式：{"col1": "zero", "col2": "drop", "col3": "ffill"}
+              Per-column strategies: {"col1": "zero", "col2": "drop", "col3": "ffill"}
+        return_info: 若为 True，返回 (df, 处理信息字典)；否则只返回 df
+    
+    返回 / Returns:
+        - 若 return_info=False：处理后的 DataFrame
+        - 若 return_info=True：(处理后的 DataFrame, 处理信息字典)
+        
+    处理规则 / Rules:
+        Auto 模式：
+        - ID列: drop（无ID的行无效）
+        - 日期列: ffill 然后 bfill
+        - 计数类: zero（缺失 = 无该项）
+        - 财务数据: drop（不应假设为0）
+        - 分类: ffill → bfill（重复前值）
+        - 其他: drop（保守方案）
+    """
+    # 若 DataFrame 为空则直接返回
+    if df is None or df.empty:
+        if return_info:
+            return df, {"status": "empty", "processed_columns": {}}
+        return df
+    
+    out = df.copy()
+    process_info = {}
+    
+    # 统一化 strategy 参数为字典形式 {col: strategy}
+    # Normalize strategy parameter to per-column dict format
+    if isinstance(strategy, dict):
+        col_strategies = strategy
+    elif strategy == "auto":
+        # 自动检测每列的最佳策略
+        col_strategies = {}
+        for col in out.columns:
+            col_type = _detect_column_type(col, out[col])
+            if col_type == "id":
+                col_strategies[col] = "drop"
+            elif col_type == "date":
+                col_strategies[col] = "ffill"
+            elif col_type == "countable":
+                col_strategies[col] = "zero"
+            elif col_type == "financial":
+                col_strategies[col] = "drop"
+            elif col_type == "categorical":
+                col_strategies[col] = "ffill"
+            else:
+                col_strategies[col] = "drop"
+    else:
+        # 简单字符串策略应用到全部列
+        col_strategies = {col: strategy for col in out.columns}
+    
+    # 处理每一列
+    # Process each column with its assigned strategy
+    for col in out.columns:
+        col_strategy = col_strategies.get(col, "drop")  # 默认 drop
+        missing_count = out[col].isna().sum()
+        process_info[col] = {
+            "strategy": col_strategy,
+            "missing_count": int(missing_count),
+            "missing_ratio": float(missing_count / len(out)) if len(out) > 0 else 0.0,
+        }
+        
+        # 无缺失值则跳过
+        # Skip if no missing values
+        if missing_count == 0:
+            continue
+        
+        if col_strategy == "drop":
+            # 删除该列的缺失行（仅限该列）
+            # Drop rows where this column is missing
+            out = out.dropna(subset=[col]).reset_index(drop=True)
+            process_info[col]["action"] = "dropped_rows"
+            process_info[col]["rows_dropped"] = int(missing_count)
+        
+        elif col_strategy == "zero":
+            # 仅对数值列填零
+            # Fill with zero (only for numeric columns)
+            if pd.api.types.is_numeric_dtype(out[col]):
+                out[col] = out[col].fillna(0)
+                process_info[col]["action"] = "filled_zero"
+            else:
+                # 非数值列无法填零，改为 drop
+                out = out.dropna(subset=[col]).reset_index(drop=True)
+                process_info[col]["action"] = "non_numeric_dropped"
+                process_info[col]["rows_dropped"] = int(missing_count)
+        
+        elif col_strategy == "ffill":
+            # 前向填充 + 后向填充
+            # Forward-fill then back-fill (avoid deprecated fillna(method=...))
+            out[col] = out[col].ffill().bfill()
+            remaining_na = out[col].isna().sum()
+            process_info[col]["action"] = "filled_ffill_bfill"
+            process_info[col]["remaining_na"] = int(remaining_na)
+    
+    if return_info:
+        return out, {"processed_columns": process_info}
+    return out
 
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:

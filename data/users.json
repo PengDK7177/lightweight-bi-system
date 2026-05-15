@@ -4,6 +4,16 @@
       "username": "admin",
       "password_hash": "31c44fec89506b68aba67a7150950406$b07c3ed194e59a5650c1740945d77df7b721f5683171235a9817d4b9def52928",
       "role": "admin"
+    },
+    {
+      "username": "admin1",
+      "password_hash": "060e4340b255fb8bbd1053504cea874f$db0aff260a8190353aec9ecbf8eb1aa33aead204c089234c955ec5f7f6c62661",
+      "role": "user"
+    },
+    {
+      "username": "test",
+      "password_hash": "92039bff1b9b5e450e554c249ba5ab81$c45a6892a14688c18520f5ad7984380a5ca6498f2794cab43ffaba2e4a89cb29",
+      "role": "user"
     }
   ]
 }

@@ -48,34 +48,124 @@ if st.button("Remove Duplicates"):
 # 缺失值处理选项（面向非技术用户的可读文案）
 # Missing-value options with non-technical, user-friendly labels
 missing_value_options = {
+    "Auto-detect (recommended)": "auto",
     "Remove rows with missing values": "drop",
     "Replace missing values with 0": "zero",
     "Fill using the previous available value": "ffill",
 }
 
-# 下拉框展示易懂文案；内部仍映射到原有策略代码，保证后端逻辑不变
-# Show friendly labels in the selectbox while mapping to existing strategy codes internally
-selected_option_label = st.selectbox(
-    "How should we handle missing values?",
-    list(missing_value_options.keys()),
-)
-strategy = missing_value_options[selected_option_label]
+st.subheader("How should we handle missing values?")
 
-# 为每个选项提供简短说明，帮助 SME 用户理解对数据的影响
-# Provide short explanations for each option so SME users understand the data impact
-missing_value_explanations = {
-    "Remove rows with missing values": "Rows that have any empty cells will be deleted from the dataset.",
-    "Replace missing values with 0": "Empty cells will be replaced with 0, useful when 0 is a meaningful value.",
-    "Fill using the previous available value": "Each empty cell is filled with the value from the previous row in the same column.",
-}
-st.caption(f"Explanation: {missing_value_explanations[selected_option_label]}")
+# 简单模式 vs 高级模式切换
+# Toggle between simple and advanced modes
+mode_col1, mode_col2 = st.columns(2)
+with mode_col1:
+    use_simple_mode = st.checkbox("Simple mode (apply to all columns)", value=True, key="simple_mode_toggle")
 
-# 按钮：应用所选策略并将结果存回会话状态
-# Button: apply the chosen strategy and persist the result to session state
-if st.button("Apply Missing Value Strategy"):
-    df = fill_missing(df, strategy=strategy)
-    st.session_state["df"] = df
-    st.success(f"Applied: {selected_option_label}")
+# 简单模式：全局策略
+# Simple mode: global strategy for all columns
+if use_simple_mode:
+    selected_option_label = st.selectbox(
+        "Choose a strategy for all columns:",
+        list(missing_value_options.keys()),
+    )
+    strategy = missing_value_options[selected_option_label]
+    
+    # 为每个选项提供简短说明，帮助 SME 用户理解对数据的影响
+    # Provide short explanations for each option so SME users understand the data impact
+    missing_value_explanations = {
+        "Auto-detect (recommended)": "Each column's missing values are handled based on its type: IDs→drop, numbers→zero, dates→ffill, etc.",
+        "Remove rows with missing values": "Rows that have any empty cells will be deleted from the dataset.",
+        "Replace missing values with 0": "Empty cells will be replaced with 0, useful when 0 is a meaningful value.",
+        "Fill using the previous available value": "Each empty cell is filled with the value from the previous row in the same column.",
+    }
+    st.caption(f"Explanation: {missing_value_explanations[selected_option_label]}")
+    
+    # 按钮：应用所选策略并将结果存回会话状态
+    # Button: apply the chosen strategy and persist the result to session state
+    if st.button("Apply Missing Value Strategy"):
+        df, info = fill_missing(df, strategy=strategy, return_info=True)
+        st.session_state["df"] = df
+        st.success(f"Applied: {selected_option_label}")
+        
+        # 显示处理摘要
+        # Show processing summary
+        with st.expander("View processing details"):
+            for col, details in info["processed_columns"].items():
+                status = f"**{col}** → {details['strategy']}"
+                if details['missing_count'] > 0:
+                    status += f" ({details['action']}, {details['missing_count']} missing values)"
+                st.write(status)
+
+# 高级模式：按列指定策略
+# Advanced mode: specify strategy per column
+else:
+    st.info("📋 Select a strategy for each column independently. Columns with no missing values will not be affected.")
+    
+    # 初始化会话状态中的列策略配置（若未存在）
+    # Initialize per-column strategy config in session state (if not already present)
+    if "col_strategies" not in st.session_state:
+        st.session_state["col_strategies"] = {col: "auto" for col in df.columns}
+    
+    # 创建两列布局：列名 + 策略选择框
+    # Layout: column name | strategy selector
+    strategy_labels = {
+        "auto": "🤖 Auto-detect",
+        "drop": "🗑️ Drop rows with missing",
+        "zero": "0️⃣ Fill with zero",
+        "ffill": "➡️ Fill with previous value",
+    }
+    
+    # 分组展示列（按列类型猜测进行分组，便于用户理解）
+    # Group columns by likely type to help users navigate
+    st.write("**Configure strategy for each column:**")
+    
+    col_strategy_container = st.container()
+    with col_strategy_container:
+        # 为每个数据列创建选择器
+        # Create a selector for each data column
+        cols_per_row = 2
+        cols = st.columns(cols_per_row)
+        
+        for idx, col in enumerate(df.columns):
+            col_widget = cols[idx % cols_per_row]
+            with col_widget:
+                missing_in_col = df[col].isna().sum()
+                missing_label = f" ({missing_in_col} missing)" if missing_in_col > 0 else " (complete)"
+                
+                selected = st.selectbox(
+                    f"{col}{missing_label}",
+                    list(strategy_labels.keys()),
+                    format_func=lambda x: strategy_labels[x],
+                    key=f"col_strategy_{col}",
+                )
+                st.session_state["col_strategies"][col] = selected
+    
+    # 按钮：应用按列的自定义策略
+    # Button: apply per-column strategy configuration
+    if st.button("Apply Custom Per-Column Strategy"):
+        # 使用会话状态中的列策略配置
+        # Use the per-column strategy configuration from session state
+        df, info = fill_missing(df, strategy=st.session_state["col_strategies"], return_info=True)
+        st.session_state["df"] = df
+        st.success("✅ Custom strategies applied!")
+        
+        # 显示详细处理结果
+        # Show detailed processing results
+        with st.expander("View processing details"):
+            processed_summary = []
+            for col, details in info["processed_columns"].items():
+                action = details.get('action', 'skipped')
+                rows_affected = details.get('rows_dropped', 0)
+                status_line = f"**{col}** → {details['strategy']} | {action}"
+                if rows_affected > 0:
+                    status_line += f" (dropped {rows_affected} rows)"
+                elif details['missing_count'] > 0:
+                    status_line += f" (affected {details['missing_count']} cells)"
+                processed_summary.append(status_line)
+            
+            for line in processed_summary:
+                st.write(line)
 
 # 按钮：自动检测日期列并将其格式统一为英国标准格式 DD/MM/YYYY
 # Button: auto-detect date columns and reformat them to UK standard DD/MM/YYYY

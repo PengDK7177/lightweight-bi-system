@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 
 # 引入 Streamlit 用于构建 Web UI 及维护会话状态
@@ -116,6 +117,103 @@ def _ensure_user_store() -> dict:
         payload["users"] = []
 
     return payload
+
+
+def _save_user_store(payload: dict) -> bool:
+    """
+    将用户数据写回本地 JSON 文件，成功返回 True，失败返回 False。
+    Persist user payload back to local JSON storage; returns True on success.
+    """
+    try:
+        USER_STORE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def _validate_username(username: str) -> tuple[bool, str]:
+    """
+    校验用户名基础规则：长度与字符集。
+    Validate basic username rules: length and allowed character set.
+    """
+    if len(username) < 3:
+        return False, "Username must be at least 3 characters"
+    if len(username) > 32:
+        return False, "Username cannot exceed 32 characters"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", username):
+        return False, "Username can only use letters, numbers, _, ., -"
+    return True, ""
+
+
+def _validate_password_complexity(password: str) -> tuple[bool, str]:
+    """
+    校验密码复杂性：长度、大小写、数字、特殊字符、空白字符。
+    Validate password complexity: length, case mix, digits, special chars, no spaces.
+    """
+    issues: list[str] = []
+
+    if len(password) < 8:
+        issues.append("at least 8 characters")
+    if not re.search(r"[A-Z]", password):
+        issues.append("at least 1 uppercase letter")
+    if not re.search(r"[a-z]", password):
+        issues.append("at least 1 lowercase letter")
+    if not re.search(r"\d", password):
+        issues.append("at least 1 number")
+    if not re.search(r"[^A-Za-z0-9]", password):
+        issues.append("at least 1 special character")
+    if re.search(r"\s", password):
+        issues.append("no spaces")
+
+    if issues:
+        return False, "Password must contain: " + ", ".join(issues)
+
+    return True, ""
+
+
+def register_local_user(username: str, password: str, confirm_password: str) -> tuple[bool, str]:
+    """
+    创建本地账户：执行用户名/密码校验、重复用户检查并保存哈希密码。
+    Create a local account with validations, duplicate-check, and hashed password storage.
+    """
+    normalized_username = username.strip()
+
+    if not normalized_username:
+        return False, "Username is required"
+    if not password:
+        return False, "Password is required"
+    if password != confirm_password:
+        return False, "Passwords do not match"
+
+    username_ok, username_message = _validate_username(normalized_username)
+    if not username_ok:
+        return False, username_message
+
+    password_ok, password_message = _validate_password_complexity(password)
+    if not password_ok:
+        return False, password_message
+
+    payload = _ensure_user_store()
+    existing_usernames = {
+        str(user.get("username", "")).strip().lower()
+        for user in payload.get("users", [])
+        if isinstance(user, dict)
+    }
+    if normalized_username.lower() in existing_usernames:
+        return False, "Username already exists"
+
+    payload["users"].append(
+        {
+            "username": normalized_username,
+            "password_hash": _hash_password(password),
+            "role": "user",
+        }
+    )
+
+    if not _save_user_store(payload):
+        return False, "Failed to save user account"
+
+    return True, "Registration successful"
 
 
 def authenticate_local_user(username: str, password: str) -> dict | None:
@@ -277,21 +375,48 @@ def login_form() -> bool:
     with mid:
         st.markdown(
             '<div class="login-card">'
-            '<h2>Login</h2>'
-            '<p class="subtitle">to get started</p>'
+            '<h2>Welcome</h2>'
+            '<p class="subtitle">Sign in or create a new account</p>'
             '</div>',
             unsafe_allow_html=True,
         )
 
-        with st.form("login_form"):
-            username = st.text_input("Username", placeholder="Username")
-            password = st.text_input("Password", type="password", placeholder="Password")
-            submitted = st.form_submit_button("Login", use_container_width=True)
+        submitted_login = False
+        submitted_register = False
+
+        login_tab, register_tab = st.tabs(["Login", "Register"])
+
+        with login_tab:
+            with st.form("login_form"):
+                username = st.text_input("Username", placeholder="Username", key="login_username")
+                password = st.text_input(
+                    "Password", type="password", placeholder="Password", key="login_password"
+                )
+                submitted_login = st.form_submit_button("Login", use_container_width=True)
+
+        with register_tab:
+            st.caption(
+                "Password rules: at least 8 chars, uppercase, lowercase, number, special character, and no spaces."
+            )
+            with st.form("register_form"):
+                register_username = st.text_input(
+                    "Username", placeholder="Create a username", key="register_username"
+                )
+                register_password = st.text_input(
+                    "Password", type="password", placeholder="Create a password", key="register_password"
+                )
+                confirm_password = st.text_input(
+                    "Confirm Password",
+                    type="password",
+                    placeholder="Enter password again",
+                    key="register_confirm_password",
+                )
+                submitted_register = st.form_submit_button("Register", use_container_width=True)
 
         st.caption("Default account (first run): **admin** / **admin123**")
 
     # Authentication logic (outside the column so session state writes are safe)
-    if submitted:
+    if submitted_login:
         user = authenticate_local_user(username, password)
         if user:
             st.session_state["authenticated"] = True
@@ -300,6 +425,16 @@ def login_form() -> bool:
         else:
             with mid:
                 st.error("Invalid username or password")
+
+    if submitted_register:
+        success, message = register_local_user(register_username, register_password, confirm_password)
+        if success:
+            st.session_state["authenticated"] = True
+            st.session_state["username"] = register_username.strip()
+            st.rerun()
+        else:
+            with mid:
+                st.error(message)
 
     return bool(st.session_state.get("authenticated"))
 
