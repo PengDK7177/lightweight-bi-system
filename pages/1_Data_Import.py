@@ -4,25 +4,39 @@ import pandas as pd
 from pathlib import Path
 from modules.data_import import load_csv
 from modules.auth import require_login, clear_dataset_state
+from modules.ui import inject_bi_theme, render_page_header
 
 # 若用户未登录则阻止页面继续渲染，并在侧边栏显示用户信息
 # Halt page rendering for unauthenticated users and show user info in the sidebar
 require_login(logout_key="logout_data_import")
 
 # 显示页面标题
-# Display the page title
-st.title("Data Import")
+# Inject the shared BI visual theme so authenticated pages feel consistent
+inject_bi_theme()
 
 # 提供文件上传控件，支持 CSV 和 Excel 格式
-# Provide a file upload widget that accepts CSV and Excel formats
-uploaded = st.file_uploader("Upload CSV/Excel", type=["csv", "xlsx", "xls"])
-
 # 扫描 data/raw 目录，列出可供直接加载的本地文件
 # Scan the data/raw directory to list local files available for direct loading
 raw_dir = Path("data/raw")
 local_files = []
 if raw_dir.exists():
     local_files = [p.name for p in raw_dir.iterdir() if p.suffix.lower() in [".csv", ".xlsx", ".xls"]]
+
+# 渲染统一页面头部，展示当前可用本地数据源数量
+# Render the shared page header and show the number of available local data sources
+render_page_header(
+    "Data Import",
+    "Bring CSV or Excel files into the BI workspace, then persist a clean working copy for preview, cleaning, and analytics.",
+    stats=[
+        (str(len(local_files)), "Local files available"),
+        ("CSV/XLSX", "Supported formats"),
+        ("Session", "Current workspace scope"),
+    ],
+)
+
+# 提供文件上传控件，支持 CSV 和 Excel 格式
+# Provide a file upload widget that accepts CSV and Excel formats
+uploaded = st.file_uploader("Upload CSV/Excel", type=["csv", "xlsx", "xls"])
 
 # 提供下拉框让用户从本地 raw 目录中选择文件
 # Provide a selectbox for the user to pick a file from the local raw directory

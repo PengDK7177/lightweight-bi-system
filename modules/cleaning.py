@@ -204,21 +204,18 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# 修正版日期标准化实现：覆盖上方旧实现，修复混合格式和脏值导致的漏检
+# Revised date standardisation implementation: overrides the older version above and fixes missed detection with mixed formats and dirty values
 def standardize_dates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """
-    自动检测 DataFrame 中的日期列，并将其格式统一为英国标准格式 DD/MM/YYYY（字符串类型）。
-    Auto-detect date columns in the DataFrame and reformat them to the UK standard DD/MM/YYYY (as strings).
+    自动检测日期列，并将可解析日期统一为英国标准格式 DD/MM/YYYY。
+    Auto-detect date columns and convert parseable dates to UK DD/MM/YYYY format.
 
-    检测规则 / Detection rules:
-    - 已为 datetime64 类型的列直接格式化。
-      Columns already typed as datetime64 are formatted directly.
-    - object/string 类型的列尝试用 pandas 解析；解析失败的列保持不变。
-      Object/string columns are parsed with pandas; columns that fail to parse are left unchanged.
-
-    返回 / Returns:
-        (transformed_df, list_of_converted_column_names)
-        转换后的 DataFrame 副本，以及成功转换的列名列表（用于 UI 反馈）。
-        A copy of the transformed DataFrame and a list of column names that were converted (for UI feedback).
+    说明 / Notes:
+    - invoice_date、signup_date 等列名命中日期关键词时，即使混有少量脏值也会被识别。
+      Columns such as invoice_date and signup_date are detected by name even when they contain dirty values.
+    - 无法解析的非空值会保留原样，避免把 not_a_date 等数据质量线索静默清空。
+      Unparseable non-null values are preserved so data-quality clues such as not_a_date are not silently removed.
     """
     # 若 DataFrame 为空则直接返回，并附带空列表表示无列被转换
     # Return early with an empty list when the DataFrame is None or empty
@@ -228,79 +225,181 @@ def standardize_dates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     # 复制 DataFrame，保持原始数据不变
     # Copy the DataFrame to avoid mutating the caller's data
     out = df.copy()
-
-    # 记录成功转换的列名，供调用方在 UI 中展示反馈信息
-    # Track converted column names so the caller can display feedback in the UI
     converted: list[str] = []
 
-    def _best_date_parse(series: pd.Series) -> tuple[pd.Series, float]:
-        """
-        尝试多种日期解析策略，返回成功率最高的解析结果。
-        Try multiple date parsing strategies and return the parsed series with the highest success ratio.
-        """
-        # 候选解析策略：优先显式格式，最后兜底自动推断
-        # Candidate parsing strategies: explicit formats first, then generic inference
-        candidates = [
-            pd.to_datetime(series, errors="coerce", format="%Y-%m-%d"),
-            pd.to_datetime(series, errors="coerce", format="%d/%m/%Y"),
-            pd.to_datetime(series, errors="coerce", format="%d-%m-%Y"),
-            pd.to_datetime(series, errors="coerce", dayfirst=True),
-            pd.to_datetime(series, errors="coerce", dayfirst=False),
-        ]
+    # 日期列名提示词：命中这些词时降低检测阈值
+    # Date column name hints: lower the detection threshold when any hint is present
+    date_name_hints = {
+        "date", "time", "datetime", "timestamp", "created", "updated",
+        "start", "end", "signup", "dob", "birth", "paid_on", "due",
+    }
 
-        best = candidates[0]
-        best_ratio = (best.notna().sum() / len(series)) if len(series) > 0 else 0.0
-        for parsed in candidates[1:]:
-            ratio = (parsed.notna().sum() / len(series)) if len(series) > 0 else 0.0
-            if ratio > best_ratio:
-                best = parsed
-                best_ratio = ratio
-        return best, best_ratio
+    def _has_date_name_hint(column_name: str) -> bool:
+        """
+        判断列名是否明显暗示日期含义。
+        Decide whether the column name clearly suggests date semantics.
+        """
+        normalized_name = str(column_name).lower()
+        return any(hint in normalized_name for hint in date_name_hints)
+
+    def _parse_dates_lenient(series: pd.Series) -> pd.Series:
+        """
+        使用多种显式格式逐步解析日期，兼容同一列中混合的 /、-、ISO 等格式。
+        Parse dates with multiple explicit formats so mixed /, -, and ISO formats in one column are supported.
+        """
+        # 先把值转为 pandas string，并清理首尾空白，避免空格影响解析
+        # Convert values to pandas string and trim whitespace so spaces do not break parsing
+        text = series.astype("string").str.strip()
+
+        # 用全 NaT 序列作为结果容器，后续格式只填补尚未解析成功的位置
+        # Use an all-NaT result series and let later formats fill only still-missing positions
+        parsed_result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+
+        def _safe_parse_scalar(value: object, date_format: str | None = None):
+            """
+            安全解析单个日期值；超出 pandas 纳秒时间范围的值会返回 NaT。
+            Safely parse one date value; values outside pandas' nanosecond timestamp range return NaT.
+            """
+            try:
+                parsed = pd.to_datetime(value, errors="coerce", format=date_format)
+            except (pd.errors.OutOfBoundsDatetime, OverflowError, ValueError):
+                return pd.NaT
+
+            if pd.isna(parsed):
+                return pd.NaT
+
+            # pandas datetime64[ns] 只能稳定覆盖约 1678-2261 年；超出范围保留原值
+            # pandas datetime64[ns] is safe roughly for years 1678-2261; out-of-range values are preserved
+            parsed_year = getattr(parsed, "year", None)
+            if parsed_year is None or parsed_year < 1678 or parsed_year > 2261:
+                return pd.NaT
+
+            try:
+                return pd.Timestamp(parsed)
+            except (pd.errors.OutOfBoundsDatetime, OverflowError, ValueError):
+                return pd.NaT
+
+        def _safe_parse_with_format(values: pd.Series, date_format: str | None = None) -> pd.Series:
+            """
+            逐值安全解析日期，避免某个异常值拖垮整列转换。
+            Parse dates safely value by value so one exceptional value cannot break the whole column.
+            """
+            parsed_values = [_safe_parse_scalar(value, date_format=date_format) for value in values]
+            return pd.Series(parsed_values, index=values.index, dtype="datetime64[ns]")
+
+        def _safe_parse_dayfirst(values: pd.Series) -> pd.Series:
+            """
+            安全执行 dayfirst=True 兜底解析，避免 2400-01-01 等值导致整列失败。
+            Safely run the dayfirst=True fallback so values like 2400-01-01 do not crash the whole column.
+            """
+            parsed_values = []
+            for value in values:
+                try:
+                    parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
+                except (pd.errors.OutOfBoundsDatetime, OverflowError, ValueError):
+                    parsed_values.append(pd.NaT)
+                    continue
+
+                if pd.isna(parsed):
+                    parsed_values.append(pd.NaT)
+                    continue
+
+                parsed_year = getattr(parsed, "year", None)
+                if parsed_year is None or parsed_year < 1678 or parsed_year > 2261:
+                    parsed_values.append(pd.NaT)
+                    continue
+
+                try:
+                    parsed_values.append(pd.Timestamp(parsed))
+                except (pd.errors.OutOfBoundsDatetime, OverflowError, ValueError):
+                    parsed_values.append(pd.NaT)
+            return pd.Series(parsed_values, index=values.index, dtype="datetime64[ns]")
+
+        # 显式格式优先，避免 pandas 对混合格式列只按第一种格式推断导致漏识别
+        # Prefer explicit formats so pandas does not infer only the first format in mixed-format columns
+        formats = [
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%d/%m/%Y",
+            "%d-%m-%Y",
+            "%d.%m.%Y",
+            "%d %m %Y",
+            "%d %b %Y",
+            "%d %B %Y",
+        ]
+        for fmt in formats:
+            parsed_attempt = _safe_parse_with_format(text, date_format=fmt)
+            parsed_result = parsed_result.fillna(parsed_attempt)
+
+        # 最后使用 dayfirst=True 兜底，并屏蔽 pandas 对脏值列的格式推断提示
+        # Finally fall back to dayfirst=True and suppress pandas inference warnings for dirty columns
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            parsed_fallback = _safe_parse_dayfirst(text)
+        parsed_result = parsed_result.fillna(parsed_fallback)
+        return parsed_result
+
+    def _parse_ratio(parsed: pd.Series, source: pd.Series) -> float:
+        """
+        计算非空原始值中成功解析为日期的比例。
+        Calculate the share of non-null source values that were parsed as dates.
+        """
+        non_null_count = source.notna().sum()
+        if non_null_count == 0:
+            return 0.0
+        return float(parsed.notna().sum() / non_null_count)
 
     for col in out.columns:
-        # 情况 1：列已是 datetime 类型，直接格式化为 DD/MM/YYYY 字符串
-        # Case 1: column is already a datetime dtype — format directly to DD/MM/YYYY string
+        # 情况 1：列已经是 datetime 类型，直接格式化为 DD/MM/YYYY 字符串
+        # Case 1: column is already a datetime dtype; format directly to DD/MM/YYYY string
         if pd.api.types.is_datetime64_any_dtype(out[col]):
             out[col] = out[col].dt.strftime("%d/%m/%Y")
             converted.append(col)
             continue
 
         # 情况 2：文本列（object 或 pandas string）尝试识别日期
-        # Case 2: textual column (object or pandas string)  attempt date detection
+        # Case 2: textual column (object or pandas string) attempts date detection
         if not (pd.api.types.is_object_dtype(out[col]) or pd.api.types.is_string_dtype(out[col])):
             continue
 
-        # 取前 '50 个非空样本做快速识别，按可解析比例判断是否为日期列
-        # Use up to 50 non-null samples and decide by parse ratio instead of requiring 100% success
-        sample = out[col].dropna().head(50)
+        # 取前 100 个非空样本做快速识别，降低大表解析成本
+        # Use up to 100 non-null samples for fast detection on large datasets
+        sample = out[col].dropna().head(100)
         if len(sample) == 0:
             continue
 
-        # 通过多策略尝试提高识别准确率（兼容 YYYY-MM-DD 与 UK 格式）
-        # Use multi-strategy parsing for robust detection across ISO and UK date formats
-        parsed_sample, sample_ratio = _best_date_parse(sample)
+        # 使用宽松解析器计算样本解析比例，混合格式和部分脏值都能被处理
+        # Use the lenient parser to measure sample parse ratio with mixed formats and dirty values
+        parsed_sample = _parse_dates_lenient(sample)
+        sample_ratio = _parse_ratio(parsed_sample, sample)
+        has_name_hint = _has_date_name_hint(col)
 
-        # 样本解析率过低则跳过，防止误判普通文本列
-        # Skip if sample parse ratio is too low to avoid false positives on text columns
-        if sample_ratio < 0.6:
+        # 有日期列名提示时只要求至少一个有效日期；无提示时要求较高比例以避免误判
+        # With a date name hint, require at least one valid date; without it, require a higher ratio
+        if has_name_hint:
+            should_convert = parsed_sample.notna().any()
+        else:
+            should_convert = sample_ratio >= 0.6
+
+        if not should_convert:
             continue
 
-        # 对全列使用同样的多策略解析并再次校验成功率
-        # Parse the full column with the same multi-strategy approach and validate again
-        parsed, _ = _best_date_parse(out[col])
-        non_null = out[col].notna().sum()
-        full_ratio = (parsed.notna().sum() / non_null) if non_null > 0 else 0.0
-
-        # 满足阈值才执行标准化输出
-        # Standardize output only when the full-column parse ratio passes the threshold
-        if full_ratio >= 0.5:
-            out[col] = parsed.dt.strftime("%d/%m/%Y").fillna("")
+        # 解析完整列；对列名明确的日期字段使用宽松阈值，对普通文本字段保持保守阈值
+        # Parse the full column; use a lenient threshold for named date fields and a conservative one otherwise
+        parsed = _parse_dates_lenient(out[col])
+        full_ratio = _parse_ratio(parsed, out[col])
+        if (has_name_hint and parsed.notna().any()) or full_ratio >= 0.5:
+            # 仅替换成功解析的单元格；无法解析的值保持原样，便于用户后续清洗
+            # Replace only successfully parsed cells; preserve unparseable values for later user review
+            formatted = parsed.dt.strftime("%d/%m/%Y")
+            out[col] = out[col].where(parsed.isna(), formatted)
             converted.append(col)
 
     return out, converted
 
 
-# GBP 货币字段标准化
 # GBP currency field standardisation
 
 

@@ -8,6 +8,7 @@ from modules.analytics import (
     rfm_segment_summary,
 )
 from modules.auth import require_login
+from modules.ui import inject_bi_theme, render_empty_state, render_page_header
 
 # 若用户未登录则阻止页面继续渲染
 # Halt page rendering for unauthenticated users
@@ -15,13 +16,13 @@ require_login(logout_key="logout_analytics")
 
 # 显示页面标题
 # Display the page title
-st.title("Analytics")
+inject_bi_theme()
 
 # 从会话状态读取数据集；若不存在则提示用户先前往数据导入页
 # Read the dataset from session state; prompt the user to import data first if absent
 df = st.session_state.get("df")
 if df is None:
-    st.warning("No dataset in session. Go to Data Import first.")
+    render_empty_state("No dataset in session. Go to Data Import first.")
     st.stop()
 
 # 筛选出所有整数或浮点数类型的列，作为可供分析的数值列列表
@@ -53,6 +54,18 @@ customer_cols = [c for c in df.columns if any(k in c.lower() for k in ["customer
 # 候选状态列：用于现金流里的已支付/未支付区分
 # Candidate status columns: used to distinguish paid vs unpaid cash flow
 status_cols = [c for c in df.columns if any(k in c.lower() for k in ["status", "payment", "state"])]
+
+# 渲染统一页面头部，并展示可分析字段概览
+# Render the shared page header and show an overview of analysable fields
+render_page_header(
+    "Analytics",
+    "Run reusable VAT, cash-flow, customer frequency, payment status, and RFM analyses for the dashboard and exports.",
+    stats=[
+        (str(len(num_cols)), "Numeric columns"),
+        (str(len(date_cols)), "Date-like columns"),
+        (str(len(customer_cols)), "Customer fields"),
+    ],
+)
 
 with st.container(border=True):
     st.subheader("VAT Analysis")

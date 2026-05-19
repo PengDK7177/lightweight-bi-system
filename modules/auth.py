@@ -1,5 +1,6 @@
 # 引入标准库：hashlib 用于密码哈希，hmac 用于安全比对，json/os/Path 用于文件操作
 # Standard library imports: hashlib for password hashing, hmac for secure comparison, json/os/Path for file I/O
+import base64
 import hashlib
 import hmac
 import json
@@ -300,89 +301,259 @@ def render_user_sidebar(logout_key: str = "logout") -> None:
 
 
 def login_form() -> bool:
-    """
-    渲染居中卡片式登录表单，验证成功后更新会话状态并重新加载应用。
-    Render a centred card-style login form; update session state and rerun on success.
-    """
-    # ── Card container CSS ──────────────────────────────────────────────────
+    """Render a polished BI-focused login screen; update session state and rerun on success."""
+    hero_image_path = Path("assets/login-data-hero.png")
+    hero_image_css = (
+        f"url(data:image/png;base64,{base64.b64encode(hero_image_path.read_bytes()).decode('ascii')})"
+        if hero_image_path.exists()
+        else "linear-gradient(135deg, #10202f 0%, #133d42 48%, #1b2a36 100%)"
+    )
+
     st.markdown(
-        """
+        f"""
         <style>
-        /* Full-page grey background */
-        [data-testid="stAppViewContainer"] {
-            background-color: #f0f2f6;
-        }
-        [data-testid="stHeader"] { background: transparent; }
-
-        /* Centred card wrapper */
-        .login-card-outer {
+        [data-testid="stAppViewContainer"] {{
+            background:
+                radial-gradient(circle at 12% 12%, rgba(35, 181, 169, 0.20), transparent 28%),
+                radial-gradient(circle at 88% 18%, rgba(246, 177, 74, 0.14), transparent 24%),
+                linear-gradient(135deg, #071017 0%, #0f1b24 44%, #f3f6f8 44%, #f7fafc 100%);
+        }}
+        [data-testid="stHeader"] {{ background: transparent; }}
+        .block-container {{
+            max-width: 1180px;
+            padding-top: 4.2rem;
+            padding-bottom: 3rem;
+        }}
+        .login-hero {{
+            position: relative;
+            min-height: 610px;
+            overflow: hidden;
+            border-radius: 24px;
+            padding: 2.2rem;
+            color: #f8fbfc;
+            background:
+                linear-gradient(90deg, rgba(5, 14, 22, 0.34), rgba(5, 14, 22, 0.74)),
+                {hero_image_css};
+            background-size: cover;
+            background-position: center;
+            box-shadow: 0 28px 70px rgba(3, 10, 18, 0.34);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+        }}
+        .login-hero::after {{
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(180deg, transparent 0%, rgba(6, 14, 20, 0.82) 100%);
+            pointer-events: none;
+        }}
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
+            min-height: 610px;
+            padding: 2.1rem 2rem;
+            border-radius: 24px;
+            background: rgba(255, 255, 255, 0.94);
+            border: 1px solid rgba(18, 31, 42, 0.08);
+            box-shadow: 0 24px 62px rgba(16, 31, 43, 0.14);
+        }}
+        .hero-content {{
+            position: relative;
+            z-index: 1;
             display: flex;
-            justify-content: center;
+            min-height: 530px;
+            flex-direction: column;
+            justify-content: space-between;
+        }}
+        .brand-mark {{
+            display: inline-flex;
             align-items: center;
-            min-height: 80vh;
-            padding: 1rem;
-        }
-        .login-card {
-            background: #ffffff;
-            border-radius: 16px;
-            box-shadow: 0 4px 24px rgba(0,0,0,0.10);
-            padding: 2.8rem 2.6rem 2.2rem 2.6rem;
-            width: 100%;
-            max-width: 420px;
-        }
-        .login-card h2 {
-            font-size: 2rem;
+            gap: 0.65rem;
+            color: #d8f7f3;
+            font-size: 0.82rem;
             font-weight: 700;
-            margin-bottom: 0.1rem;
-            color: #111;
-        }
-        .login-card .subtitle {
-            color: #555;
-            font-size: 1rem;
-            margin-bottom: 1.6rem;
-        }
-
-        /* Push Streamlit form widgets inside the card column */
-        div[data-testid="column"]:nth-child(2) .stTextInput input {
-            border-radius: 8px;
-            border: 1px solid #dde1ea;
-            padding: 0.55rem 0.8rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }}
+        .brand-mark span {{
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            display: inline-grid;
+            place-items: center;
+            background: rgba(36, 199, 184, 0.18);
+            border: 1px solid rgba(95, 230, 217, 0.42);
+            color: #67f1e3;
+            font-size: 1.05rem;
+        }}
+        .hero-title {{
+            max-width: 620px;
+            margin: 0;
+            color: #ffffff;
+            font-size: clamp(2.4rem, 5vw, 4.7rem);
+            line-height: 1.02;
+            font-weight: 800;
+            letter-spacing: 0;
+        }}
+        .hero-subtitle {{
+            max-width: 560px;
+            margin-top: 1rem;
+            color: rgba(232, 244, 245, 0.82);
+            font-size: 1.02rem;
+            line-height: 1.7;
+        }}
+        .metric-row {{
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.8rem;
+            margin-top: 1.75rem;
+        }}
+        .metric-card {{
+            padding: 1rem;
+            border-radius: 14px;
+            background: rgba(8, 18, 26, 0.54);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(12px);
+        }}
+        .metric-value {{
+            color: #ffffff;
+            font-size: 1.45rem;
+            font-weight: 800;
+            line-height: 1;
+        }}
+        .metric-label {{
+            margin-top: 0.45rem;
+            color: rgba(229, 242, 242, 0.72);
+            font-size: 0.78rem;
+            line-height: 1.35;
+        }}
+        .panel-kicker {{
+            color: #0c7f78;
+            font-size: 0.78rem;
+            font-weight: 800;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+        }}
+        .panel-title {{
+            margin: 0.45rem 0 0.55rem;
+            color: #101820;
+            font-size: 2rem;
+            line-height: 1.12;
+            font-weight: 800;
+            letter-spacing: 0;
+        }}
+        .panel-copy {{
+            margin: 0 0 1.2rem;
+            color: #5c6b75;
+            font-size: 0.94rem;
+            line-height: 1.65;
+        }}
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 0.45rem;
+            padding: 0.28rem;
+            border-radius: 12px;
+            background: #edf3f5;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            height: 2.65rem;
+            border-radius: 10px;
+            color: #52616c;
+            font-weight: 700;
+        }}
+        .stTabs [aria-selected="true"] {{
+            color: #0d1b24;
+            background: #ffffff;
+            box-shadow: 0 5px 18px rgba(18, 31, 42, 0.10);
+        }}
+        .stTextInput label {{
+            color: #22313b !important;
+            font-weight: 700 !important;
+        }}
+        .stTextInput input {{
+            min-height: 2.9rem;
+            border-radius: 10px;
+            border: 1px solid #d8e1e6;
+            background: #fbfdfe;
+            color: #121b22;
             font-size: 0.95rem;
-        }
-        div[data-testid="column"]:nth-child(2) .stFormSubmitButton button {
-            width: 100%;
-            background-color: #2c2cf0;
-            color: #fff;
+        }}
+        .stTextInput input:focus {{
+            border-color: #15a89c;
+            box-shadow: 0 0 0 3px rgba(21, 168, 156, 0.16);
+        }}
+        .stFormSubmitButton button {{
+            min-height: 3rem;
+            border-radius: 10px;
             border: none;
-            border-radius: 8px;
-            padding: 0.65rem;
-            font-size: 1rem;
-            font-weight: 600;
-            margin-top: 0.4rem;
-            cursor: pointer;
-        }
-        div[data-testid="column"]:nth-child(2) .stFormSubmitButton button:hover {
-            background-color: #1a1ae0;
-        }
+            background: linear-gradient(135deg, #0b766f 0%, #159b91 54%, #f2ad48 140%);
+            color: #ffffff;
+            font-weight: 800;
+            box-shadow: 0 14px 28px rgba(21, 139, 130, 0.24);
+        }}
+        .stFormSubmitButton button:hover {{
+            border: none;
+            background: linear-gradient(135deg, #09635d 0%, #118a81 58%, #e69d35 140%);
+            color: #ffffff;
+        }}
+        .login-footnote {{
+            margin-top: 1rem;
+            padding: 0.9rem 1rem;
+            border-radius: 12px;
+            background: #f4f8f9;
+            color: #667681;
+            font-size: 0.84rem;
+            line-height: 1.55;
+            border: 1px solid #e3ecef;
+        }}
+        @media (max-width: 900px) {{
+            [data-testid="stAppViewContainer"] {{ background: #f6fafb; }}
+            .block-container {{ padding-top: 2rem; }}
+            .login-hero,
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
+                min-height: auto;
+                border-radius: 18px;
+            }}
+            .hero-content {{ min-height: 450px; }}
+            .metric-row {{ grid-template-columns: 1fr; }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # Three-column layout: blank | card | blank  (ratio 1:1.4:1)
-    _, mid, _ = st.columns([1, 1.4, 1])
+    left, right = st.columns([1.22, 0.78], gap="large")
+    submitted_login = False
+    submitted_register = False
+    username = ""
+    password = ""
+    register_username = ""
+    register_password = ""
+    confirm_password = ""
 
-    with mid:
+    with left:
         st.markdown(
-            '<div class="login-card">'
-            '<h2>Welcome</h2>'
-            '<p class="subtitle">Sign in or create a new account</p>'
-            '</div>',
+            '<section class="login-hero">'
+            '<div class="hero-content">'
+            '<div class="brand-mark"><span>BI</span> Lightweight BI System</div>'
+            '<div>'
+            '<h1 class="hero-title">Turn messy business data into clear decisions.</h1>'
+            '<p class="hero-subtitle">A focused workspace for SME data import, cleaning, VAT analytics, '
+            'cash-flow views, and executive dashboards.</p>'
+            '<div class="metric-row">'
+            '<div class="metric-card"><div class="metric-value">5</div><div class="metric-label">Core BI modules</div></div>'
+            '<div class="metric-card"><div class="metric-value">VAT</div><div class="metric-label">Automated tax analysis</div></div>'
+            '<div class="metric-card"><div class="metric-value">CSV</div><div class="metric-label">Fast dataset onboarding</div></div>'
+            '</div>'
+            '</div>'
+            '</div>'
+            '</section>',
             unsafe_allow_html=True,
         )
 
-        submitted_login = False
-        submitted_register = False
+    with right:
+        st.markdown(
+            '<div class="panel-kicker">Secure workspace</div>'
+            '<h2 class="panel-title">Sign in to your BI cockpit</h2>'
+            '<p class="panel-copy">Access imported datasets, cleaning workflows, analytics reports, and dashboards from one place.</p>',
+            unsafe_allow_html=True,
+        )
 
         login_tab, register_tab = st.tabs(["Login", "Register"])
 
@@ -413,9 +584,12 @@ def login_form() -> bool:
                 )
                 submitted_register = st.form_submit_button("Register", use_container_width=True)
 
-        st.caption("Default account (first run): **admin** / **admin123**")
+        st.markdown(
+            '<div class="login-footnote">Default account on first run: <strong>admin</strong> / '
+            '<strong>admin123</strong></div>',
+            unsafe_allow_html=True,
+        )
 
-    # Authentication logic (outside the column so session state writes are safe)
     if submitted_login:
         user = authenticate_local_user(username, password)
         if user:
@@ -423,7 +597,7 @@ def login_form() -> bool:
             st.session_state["username"] = user.get("username")
             st.rerun()
         else:
-            with mid:
+            with right:
                 st.error("Invalid username or password")
 
     if submitted_register:
@@ -433,13 +607,11 @@ def login_form() -> bool:
             st.session_state["username"] = register_username.strip()
             st.rerun()
         else:
-            with mid:
+            with right:
                 st.error(message)
 
     return bool(st.session_state.get("authenticated"))
 
-
-# ── Complete list of dataset-related session-state keys ──────────────────────
 # All keys that any page writes when loading, cleaning, analysing, or exporting
 # data.  Keeping them in one place ensures the delete operation is always in
 # sync with the rest of the application.

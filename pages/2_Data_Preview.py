@@ -9,6 +9,7 @@ import pandas as pd
 # 引入登录守卫，确保只有已登录用户才能访问此页面
 # Import the login guard to ensure only authenticated users can access this page
 from modules.auth import require_login
+from modules.ui import inject_bi_theme, render_empty_state, render_page_header
 
 # 若用户未登录则阻止页面继续渲染
 # Halt page rendering for unauthenticated users
@@ -16,14 +17,26 @@ require_login(logout_key="logout_data_preview")
 
 # 显示页面标题
 # Display the page title
-st.title("Data Preview")
+inject_bi_theme()
 
 # 从会话状态读取数据集；若不存在则提示用户先前往数据导入页
 # Read the dataset from session state; prompt the user to import data first if absent
 df = st.session_state.get("df")
 if df is None:
-    st.warning("No dataset in session. Go to Data Import first.")
+    render_empty_state("No dataset in session. Go to Data Import first.")
     st.stop()
+
+# 渲染统一页面头部，并展示当前数据集规模
+# Render the shared page header and show the current dataset scale
+render_page_header(
+    "Data Preview",
+    "Inspect the imported dataset before cleaning and analysis, with quick checks for shape, column types, and missing values.",
+    stats=[
+        (f"{df.shape[0]:,}", "Rows"),
+        (f"{df.shape[1]:,}", "Columns"),
+        ("50", "Preview rows"),
+    ],
+)
 
 # 显示数据集的行列数，帮助用户快速了解数据规模
 # Display the row and column count to give the user a quick overview of the dataset size

@@ -8,6 +8,7 @@ from modules.cleaning import (
     mask_pii,
 )
 from modules.auth import require_login
+from modules.ui import inject_bi_theme, render_empty_state, render_page_header
 
 
 # Halt page rendering for unauthenticated users
@@ -15,14 +16,26 @@ require_login(logout_key="logout_data_cleaning")
 
 # 显示页面标题
 # Display the page title
-st.title("Data Cleaning")
+inject_bi_theme()
 
 # 从会话状态读取数据集；若不存在则提示用户先前往数据导入页
 # Read the dataset from session state; prompt the user to import data first if absent
 df = st.session_state.get("df")
 if df is None:
-    st.warning("No dataset in session. Go to Data Import first.")
+    render_empty_state("No dataset in session. Go to Data Import first.")
     st.stop()
+
+# 渲染统一页面头部，并展示清洗前数据集规模
+# Render the shared page header and show the pre-cleaning dataset scale
+render_page_header(
+    "Data Cleaning",
+    "Standardise columns, handle missing values, format dates and currency, and mask sensitive fields before analysis.",
+    stats=[
+        (f"{df.shape[0]:,}", "Rows loaded"),
+        (f"{df.shape[1]:,}", "Columns loaded"),
+        ("PII", "Masking available"),
+    ],
+)
 
 # 显示当前数据集的行列数，便于对比清洗前后的变化
 # Show the current shape so users can compare before and after cleaning

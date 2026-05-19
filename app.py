@@ -3,6 +3,7 @@ from modules.data_import import load_csv
 from modules.cleaning import remove_duplicates
 from modules.analytics import calculate_vat
 from modules.auth import init_auth_state, render_login_page, render_user_sidebar
+from modules.ui import inject_bi_theme, render_page_header
 
 # 配置页面标题和布局（宽屏模式），必须是 Streamlit 脚本中的第一个调用
 # Configure the page title and layout (wide mode); must be the first Streamlit call in the script
@@ -25,11 +26,23 @@ if not st.session_state.get("authenticated"):
 
 # 显示主页标题
 # Display the main page title
-st.title("Lightweight BI Prototype for UK SMEs")
+inject_bi_theme()
 
 # 在侧边栏渲染当前用户信息和退出按钮
 # Render the current user's info and logout button in the sidebar
 render_user_sidebar(logout_key="logout_home")
+
+# 渲染统一首页头部，引导用户进入核心 BI 工作流
+# Render the shared home header to guide users into the core BI workflow
+render_page_header(
+    "Lightweight BI Prototype for UK SMEs",
+    "Import, clean, analyse, and visualise business datasets through a focused BI workflow for small and medium enterprises.",
+    stats=[
+        ("5", "Workflow modules"),
+        ("VAT", "Financial analytics"),
+        ("Export", "Reporting ready"),
+    ],
+)
 
 # 显示欢迎信息和导航提示
 # Display a welcome message and navigation hint
