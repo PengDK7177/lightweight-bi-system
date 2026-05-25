@@ -15,7 +15,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from modules.analytics import basic_kpis, calculate_vat, cash_flow_analysis, rfm_analysis
-from modules.cleaning import fill_missing, mask_pii, remove_duplicates, standardize_dates
+from modules.cleaning import (
+    fill_missing,
+    mask_pii,
+    remove_duplicates,
+    standardize_categorical_values,
+    standardize_currency,
+    standardize_dates,
+)
 
 
 def _assert_close(actual: float, expected: float, tolerance: float = 1e-9) -> None:
@@ -153,6 +160,26 @@ def test_standardize_dates_formats_date_columns_to_uk_style():
     assert list(result["invoice_date"]) == ["15/01/2025", "16/02/2025"]
 
 
+def test_standardize_dates_handles_datetime_columns_and_invalid_dates():
+    """Date standardisation should handle datetime strings and mark impossible dates.
+
+    日期标准化应处理带时间的日期字符串，并把不可能日期标记为 Invalid Date。
+    """
+    df = pd.DataFrame(
+        {
+            "last_login": ["2026-05-08 10:30:00", "08/05/2026 22:10", "2026-99-99 99:99:99"],
+            "invoice_date": ["2026.04.30", "2026.04.31", "13/13/2026"],
+        }
+    )
+
+    result, converted_cols = standardize_dates(df)
+
+    assert "last_login" in converted_cols
+    assert "invoice_date" in converted_cols
+    assert list(result["last_login"]) == ["08/05/2026", "08/05/2026", "Invalid Date"]
+    assert list(result["invoice_date"]) == ["30/04/2026", "Invalid Date", "Invalid Date"]
+
+
 def test_mask_pii_masks_email_and_phone_columns():
     """PII masking should mask email addresses and phone numbers.
 
@@ -173,3 +200,86 @@ def test_mask_pii_masks_email_and_phone_columns():
     assert result.loc[0, "email"] == "a***@example.com"
     assert result.loc[0, "phone"].endswith("3456")
     assert "*" in result.loc[0, "phone"]
+
+
+def test_standardize_categorical_values_normalises_case_and_dirty_markers():
+    """Categorical cleaning should group missing/invalid markers and normalise casing.
+
+    分类值清洗应归类缺失/无效标记，并统一同义类别的大小写差异。
+    """
+    df = pd.DataFrame(
+        {
+            "region": ["London", "london", " LONDON ", "N/A", "invalid data"],
+            "payment_status": ["paid", " Paid ", "FAILED", None, "unknown"],
+        }
+    )
+
+    result, report = standardize_categorical_values(df)
+
+    assert list(result["region"]) == ["London", "London", "London", "Missing", "Invalid Value"]
+    assert list(result["payment_status"]) == ["Paid", "Paid", "Failed", "Missing", "Unknown"]
+    assert "region" in report["processed_columns"]
+    assert "payment_status" in report["processed_columns"]
+
+
+def test_standardize_categorical_values_classifies_postal_code_errors():
+    """Postal cleaning should separate missing, invalid, and badly formatted postcodes.
+
+    邮编清洗应区分缺失值、明确无效值和格式错误值。
+    """
+    df = pd.DataFrame(
+        {
+            "postal_code": ["sw1a1aa", "INVALID", None, "12345", " M1 1AE "],
+        }
+    )
+
+    result, report = standardize_categorical_values(df)
+
+    assert list(result["postal_code"]) == [
+        "SW1A 1AA",
+        "Invalid Postal Code",
+        "Missing",
+        "Incorrect Format",
+        "M1 1AE",
+    ]
+    assert report["processed_columns"]["postal_code"]["action"] == "standardised_postcode_categories"
+
+
+def test_fill_missing_handles_missing_labels_created_by_categorical_cleaning():
+    """Missing-value handling should still work after categorical cleaning.
+
+    即使分类清洗先把空值显示为 Missing，缺失值处理仍应继续把它当作真正缺失值处理。
+    """
+    df = pd.DataFrame({"region": ["London", None, "Leeds"], "quantity": [1, None, 3]})
+
+    categorised, _ = standardize_categorical_values(df)
+    result, info = fill_missing(categorised, strategy="auto", return_info=True)
+
+    assert list(categorised["region"]) == ["London", "Missing", "Leeds"]
+    assert list(result["region"]) == ["London", "London", "Leeds"]
+    assert result["quantity"].isna().sum() == 0
+    assert info["processed_columns"]["region"]["missing_count"] == 1
+
+
+def test_standardize_currency_cleans_gbp_amounts_and_vat_rates():
+    """Numeric standardisation should clean GBP amounts and rate fields.
+
+    数值标准化应清理 GBP 金额和 VAT rate 字段，并把无效字母值转为缺失值。
+    """
+    df = pd.DataFrame(
+        {
+            "net_amount": ["£1,200.00", "1.2e3", "abc"],
+            "amount_gbp": ["£3,333.33", "2400", "invalid"],
+            "vat_rate": ["20%", "0.2", "abc"],
+        }
+    )
+
+    result, converted_cols = standardize_currency(df)
+
+    assert {"net_amount", "amount_gbp", "vat_rate"}.issubset(set(converted_cols))
+    assert list(result["net_amount"].round(2))[:2] == [1200.00, 1200.00]
+    assert pd.isna(result.loc[2, "net_amount"])
+    assert list(result["amount_gbp"].round(2))[:2] == [3333.33, 2400.00]
+    assert pd.isna(result.loc[2, "amount_gbp"])
+    assert list(result["vat_rate"].dropna()) == [0.2, 0.2]
+    assert pd.isna(result.loc[2, "vat_rate"])

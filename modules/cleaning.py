@@ -6,6 +6,173 @@ import pandas as pd
 # Import re for regular expression matching used in PII detection and masking
 import re
 
+# Import warnings so noisy pandas date-inference warnings can be suppressed in controlled checks
+import warnings
+
+
+# 常见缺失、未知和无效标记，用于把脏分类值归入稳定类别。
+# Common missing, unknown, and invalid markers used to group dirty categorical values into stable labels.
+_MISSING_TOKENS = {"", "nan", "none", "null", "n/a", "na", "not set", "missing"}
+_UNKNOWN_TOKENS = {"unknown", "unk", "not known"}
+_INVALID_TOKENS = {"invalid", "invalid data", "error", "err"}
+
+# UK postcode pattern. It accepts a normal outward code plus inward code, with optional spacing.
+# 英国邮编格式校验；允许中间空格缺失，清洗时会重新加上标准空格。
+_UK_POSTCODE_RE = re.compile(
+    r"^(GIR\s?0AA|[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2})$",
+    re.IGNORECASE,
+)
+
+
+def _normalise_text_value(value: object) -> str | object:
+    """
+    清理单个文本值：去除首尾空格、压缩多余空格，并按常见标记归类。
+    Clean one text value: trim, collapse repeated spaces, and classify common dirty markers.
+    """
+    if pd.isna(value):
+        return "Missing"
+
+    text = re.sub(r"\s+", " ", str(value).strip())
+    lowered = text.lower()
+
+    if lowered in _MISSING_TOKENS:
+        return "Missing"
+    if lowered in _UNKNOWN_TOKENS:
+        return "Unknown"
+    if lowered in _INVALID_TOKENS:
+        return "Invalid Value"
+    return text
+
+
+def _convert_semantic_missing_to_na(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将文本型缺失标记重新转换为 pandas NA，保证后续缺失值策略仍能识别它们。
+    Convert text-based missing markers back to pandas NA so later missing-value strategies can still detect them.
+
+    说明 / Note:
+    - Standardize Categorical Values 会把空值显示为 "Missing"，便于用户查看分类质量。
+      Standardize Categorical Values displays blank values as "Missing" for clearer category review.
+    - Apply Missing Value Strategy 需要把这些显示标签重新当作缺失值处理。
+      Apply Missing Value Strategy must treat those display labels as missing values again.
+    """
+    out = df.copy()
+    semantic_missing = _MISSING_TOKENS | {"missing"}
+
+    for col in out.columns:
+        if not (pd.api.types.is_object_dtype(out[col]) or pd.api.types.is_string_dtype(out[col])):
+            continue
+
+        text_values = out[col].astype("string").str.strip().str.lower()
+        missing_mask = text_values.isin(semantic_missing)
+        if missing_mask.any():
+            out.loc[missing_mask, col] = pd.NA
+
+    return out
+
+
+def _is_postal_column(column_name: str) -> bool:
+    """
+    判断列名是否表示邮编字段。
+    Decide whether a column name represents a postal-code field.
+    """
+    name = str(column_name).lower()
+    return any(hint in name for hint in ["postal", "postcode", "post_code", "zip"])
+
+
+def _standardise_postcode(value: object) -> str:
+    """
+    将英国邮编统一为大写和标准空格；无法识别的值归类为稳定类别。
+    Standardise UK postcodes to uppercase with a normal space; group invalid values into stable labels.
+    """
+    normalised = _normalise_text_value(value)
+    if normalised == "Missing":
+        return "Missing"
+    if normalised in {"Unknown", "Invalid Value"}:
+        return "Invalid Postal Code" if normalised == "Invalid Value" else "Unknown"
+
+    compact = re.sub(r"\s+", "", str(normalised).upper())
+    if _UK_POSTCODE_RE.match(compact):
+        return f"{compact[:-3]} {compact[-3:]}"
+    return "Incorrect Format"
+
+
+def _looks_like_pii_or_free_text(column_name: str, sample: pd.Series) -> bool:
+    """
+    跳过邮箱、电话、备注等不适合统一大小写的自由文本或敏感字段。
+    Skip emails, phones, notes, and other free-text or sensitive fields that should not be title-cased.
+    """
+    name = str(column_name).lower()
+    if any(hint in name for hint in ["email", "phone", "mobile", "tel", "note", "remark", "comment"]):
+        return True
+
+    sample_text = sample.dropna().astype(str).str.strip().head(100)
+    if sample_text.empty:
+        return False
+
+    email_ratio = sample_text.apply(lambda v: bool(_EMAIL_RE.match(v))).mean()
+    long_text_ratio = sample_text.str.len().gt(40).mean()
+    return email_ratio >= 0.3 or long_text_ratio >= 0.3
+
+
+def standardize_categorical_values(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    逐列检查分类文本值，并统一异常值、空值、邮编和大小写不一致问题。
+    Inspect categorical text values column by column and standardise dirty markers, postcodes, and case inconsistencies.
+
+    返回 / Returns:
+        (cleaned_df, report)
+        report 包含每列的处理动作和受影响单元格数量。
+        report records the action and affected cell count for each processed column.
+    """
+    if df is None or df.empty:
+        return df, {"status": "empty", "processed_columns": {}}
+
+    out = df.copy()
+    report: dict[str, dict] = {}
+
+    for col in out.columns:
+        if not (pd.api.types.is_object_dtype(out[col]) or pd.api.types.is_string_dtype(out[col])):
+            continue
+
+        before = out[col].copy()
+
+        if _is_postal_column(col):
+            out[col] = out[col].apply(_standardise_postcode)
+            action = "standardised_postcode_categories"
+        else:
+            sample = out[col].dropna().head(100)
+            if _looks_like_pii_or_free_text(col, sample):
+                continue
+
+            cleaned = out[col].apply(_normalise_text_value)
+
+            # 仅对低基数字段统一大小写；ID、代码和高基数字段保持原样以避免破坏业务编码。
+            # Title-case only low-cardinality categorical fields; keep IDs, codes, and high-cardinality values intact.
+            unique_ratio = cleaned.astype(str).nunique(dropna=True) / max(len(cleaned), 1)
+            name = str(col).lower()
+            code_like = any(hint in name for hint in ["id", "code", "identifier"])
+            category_name_hint = any(
+                hint in name
+                for hint in ["category", "type", "status", "country", "city", "region"]
+            )
+            if not code_like and (category_name_hint or unique_ratio <= 0.5):
+                cleaned = cleaned.apply(
+                    lambda v: v if v in {"Missing", "Unknown", "Invalid Value"} else str(v).title()
+                )
+
+            out[col] = cleaned
+            action = "standardised_categorical_values"
+
+        changed = (before.astype("string").fillna("<NA>") != out[col].astype("string").fillna("<NA>")).sum()
+        if int(changed) > 0:
+            report[col] = {
+                "action": action,
+                "changed_cells": int(changed),
+                "categories_after": sorted(out[col].astype(str).dropna().unique().tolist())[:20],
+            }
+
+    return out, {"processed_columns": report}
+
 def remove_duplicates(df: pd.DataFrame, subset=None) -> pd.DataFrame:
     """
     删除 DataFrame 中的重复行并重置索引。
@@ -108,7 +275,9 @@ def fill_missing(
             return df, {"status": "empty", "processed_columns": {}}
         return df
     
-    out = df.copy()
+    # 先把 "Missing"/"N/A"/"NULL" 等文本标记恢复为真正缺失值，避免清洗按钮顺序影响结果。
+    # First restore "Missing"/"N/A"/"NULL" text markers to real missing values so button order does not change behaviour.
+    out = _convert_semantic_missing_to_na(df)
     process_info = {}
     
     # 统一化 strategy 参数为字典形式 {col: strategy}
@@ -214,8 +383,8 @@ def standardize_dates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     说明 / Notes:
     - invoice_date、signup_date 等列名命中日期关键词时，即使混有少量脏值也会被识别。
       Columns such as invoice_date and signup_date are detected by name even when they contain dirty values.
-    - 无法解析的非空值会保留原样，避免把 not_a_date 等数据质量线索静默清空。
-      Unparseable non-null values are preserved so data-quality clues such as not_a_date are not silently removed.
+    - 无法解析的非空日期值会标记为 Invalid Date，避免无效日期进入后续分析。
+      Unparseable non-null date values are marked as Invalid Date so invalid dates do not flow into later analysis.
     """
     # 若 DataFrame 为空则直接返回，并附带空列表表示无列被转换
     # Return early with an empty list when the DataFrame is None or empty
@@ -231,7 +400,7 @@ def standardize_dates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     # Date column name hints: lower the detection threshold when any hint is present
     date_name_hints = {
         "date", "time", "datetime", "timestamp", "created", "updated",
-        "start", "end", "signup", "dob", "birth", "paid_on", "due",
+        "start", "end", "signup", "dob", "birth", "paid_on", "due", "login",
     }
 
     def _has_date_name_hint(column_name: str) -> bool:
@@ -318,8 +487,13 @@ def standardize_dates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         # 显式格式优先，避免 pandas 对混合格式列只按第一种格式推断导致漏识别
         # Prefer explicit formats so pandas does not infer only the first format in mixed-format columns
         formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+            "%d/%m/%Y %H:%M",
+            "%d/%m/%Y %H:%M:%S",
             "%Y-%m-%d",
             "%Y/%m/%d",
+            "%Y.%m.%d",
             "%d/%m/%Y",
             "%d-%m-%Y",
             "%d.%m.%Y",
@@ -391,10 +565,15 @@ def standardize_dates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         parsed = _parse_dates_lenient(out[col])
         full_ratio = _parse_ratio(parsed, out[col])
         if (has_name_hint and parsed.notna().any()) or full_ratio >= 0.5:
-            # 仅替换成功解析的单元格；无法解析的值保持原样，便于用户后续清洗
-            # Replace only successfully parsed cells; preserve unparseable values for later user review
+            # 成功解析的值转为英国日期格式；未解析的非空日期值归类为 Invalid Date。
+            # Parsed values become UK date strings; unparseable non-empty date values are grouped as Invalid Date.
             formatted = parsed.dt.strftime("%d/%m/%Y")
+            original_text = out[col].astype("string").str.strip()
+            missing_mask = original_text.str.lower().isin(_MISSING_TOKENS) | original_text.isna()
             out[col] = out[col].where(parsed.isna(), formatted)
+            invalid_mask = parsed.isna() & ~missing_mask
+            out.loc[invalid_mask, col] = "Invalid Date"
+            out.loc[missing_mask, col] = "Missing"
             converted.append(col)
 
     return out, converted
@@ -410,6 +589,39 @@ _CURRENCY_NAME_HINTS = {
     "gbp", "value", "sales", "income", "profit", "turnover",
     "balance", "payment", "charge", "salary", "wage",
 }
+
+# 税率/比例字段提示词；这些字段会被转换为小数形式，例如 20% -> 0.20。
+# Rate/percentage column hints; these fields are converted to decimal fractions such as 20% -> 0.20.
+_RATE_NAME_HINTS = {"rate", "percent", "percentage", "vat_rate", "discount_rate"}
+
+
+def _clean_numeric_text(series: pd.Series) -> pd.Series:
+    """
+    清理金额类文本：只处理 GBP 样式，不做外币换算。
+    Clean amount-like text: handle GBP-style values only, without currency exchange conversion.
+    """
+    cleaned = (
+        series
+        .astype("string")
+        .str.replace("£", "", regex=False)
+        .str.replace("拢", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def _clean_rate_text(series: pd.Series) -> pd.Series:
+    """
+    清理税率/比例字段：支持 20%、0.2 和 20 等常见写法。
+    Clean rate/percentage fields: supports common forms such as 20%, 0.2, and 20.
+    """
+    text = series.astype("string").str.strip()
+    has_percent = text.str.contains("%", regex=False, na=False)
+    numeric = pd.to_numeric(text.str.replace("%", "", regex=False), errors="coerce")
+    numeric = numeric.where(~has_percent, numeric / 100)
+    numeric = numeric.where(~((~has_percent) & (numeric > 1) & (numeric <= 100)), numeric / 100)
+    return numeric.where((numeric >= 0) & (numeric <= 1), pd.NA)
 
 
 def standardize_currency(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
@@ -441,12 +653,15 @@ def standardize_currency(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     converted: list[str] = []
 
     for col in out.columns:
-        # ---- 判断是否为货币列 ----
-        # ---- Decide whether this column holds currency values ----
+        # ---- 判断是否为金额列或比例列 ----
+        # ---- Decide whether this column holds amount or rate values ----
 
-        # 规则 1：列名含货币关键词
-        # Rule 1: column name contains a currency keyword
-        name_match = any(hint in col.lower() for hint in _CURRENCY_NAME_HINTS)
+        col_lower = col.lower()
+
+        # 规则 1：列名含货币或比例关键词
+        # Rule 1: column name contains a currency or rate keyword
+        name_match = any(hint in col_lower for hint in _CURRENCY_NAME_HINTS)
+        rate_match = any(hint in col_lower for hint in _RATE_NAME_HINTS)
 
         # 规则 2：列值中超过 50% 含 £ 符号（仅对 object 类型列检查）
         # Rule 2: more than 50% of non-null values contain £ (only checked for object columns)
@@ -454,12 +669,26 @@ def standardize_currency(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         if out[col].dtype == object:
             non_null = out[col].dropna()
             if len(non_null) > 0:
-                gbp_count = non_null.astype(str).str.contains("£", regex=False).sum()
+                gbp_text = non_null.astype(str)
+                gbp_count = (
+                    gbp_text.str.contains('£', regex=False)
+                    | gbp_text.str.contains('拢', regex=False)
+                ).sum()
                 value_match = (gbp_count / len(non_null)) > 0.5
 
-        if not (name_match or value_match):
+        if not (name_match or value_match or rate_match):
             # 不符合任何规则，跳过
-            # Skip columns that match neither rule
+            # Skip columns that match no rule
+            continue
+
+        if rate_match:
+            # 税率字段标准化：20% -> 0.20；abc/invalid/负数 -> NA。
+            # Rate standardisation: 20% -> 0.20; abc/invalid/negative values -> NA.
+            numeric = _clean_rate_text(out[col])
+            non_null_count = out[col].notna().sum()
+            if non_null_count > 0 and (numeric.notna().sum() / non_null_count) >= 0.3:
+                out[col] = numeric
+                converted.append(col)
             continue
 
         # ---- 已是数值类型则直接记录，无需再清洗 ----
@@ -468,16 +697,9 @@ def standardize_currency(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             converted.append(col)
             continue
 
-        # ---- 清洗：去除 £、逗号、空格，再转为 float ----
+        # ---- 清洗：去除 £、逗号和空格，再转为 float ----
         # ---- Clean: strip £, commas, and spaces, then cast to float ----
-        cleaned = (
-            out[col]
-            .astype(str)
-            .str.replace("£", "", regex=False)
-            .str.replace(",", "", regex=False)
-            .str.strip()
-        )
-        numeric = pd.to_numeric(cleaned, errors="coerce")
+        numeric = _clean_numeric_text(out[col])
 
         # 仅当至少一半非空值成功转换时才接受，防止误处理普通文本列
         # Only accept the conversion if at least half of non-null values parsed successfully
@@ -588,7 +810,11 @@ def _is_likely_date_series(sample: pd.Series, threshold: float = 0.8) -> bool:
     if sample is None or len(sample) == 0:
         return False
 
-    parsed = pd.to_datetime(sample.astype(str).str.strip(), errors="coerce", dayfirst=True)
+    # 在此处只需要判断“像不像日期列”，无需向用户暴露 pandas 的格式推断提示。
+    # This is only a date-likeness check, so pandas format-inference warnings are intentionally hidden.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        parsed = pd.to_datetime(sample.astype(str).str.strip(), errors="coerce", dayfirst=True)
     return (parsed.notna().sum() / len(sample)) >= threshold
 
 
